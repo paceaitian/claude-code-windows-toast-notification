@@ -1,0 +1,113 @@
+# Claude Code Windows Notification System
+
+## 1. 项目概述
+本项目旨在为 Claude Code 提供一个原生、智能且交互性强的 Windows 通知系统。它解决了原生通知不支持交互按钮的问题，并引入了智能免打扰机制和详细的调试功能。
+
+## 2. 系统架构
+
+该系统由三个核心组件组成：
+
+1.  **Stop Hook ([windows-notification.ps1](file:///C:/Users/Xiao/.claude/hooks/windows-notification.ps1))**:
+    -   **触发时机**: 当 Claude Code 有输出（权限请求）或任务结束时触发。
+    -   **职责**:
+        -   检测当前窗口状态（Smart Delay）。
+        -   构造通知 Payload（标题、内容、按钮）。
+        -   通过 `BurntToast` 模块发送 Windows Toast 通知。
+        -   若用户未响应，等待 30 秒超时后自动恢复 Claude 运行。
+
+2.  **Protocol Handler ([protocol-handler.ps1](file:///C:/Users/Xiao/.claude/hooks/protocol-handler.ps1))**:
+    -   **触发时机**: 用户点击通知或通知按钮时 (通过 `claude-runner://` 协议)。
+    -   **职责**:
+        -   解析 URI 参数（Target PID, HWND, Debug标志）。
+        -   查找 Windows Terminal 窗口。
+        -   通过 UI Automation (UIA) 定位并选中 Claude Code 所在的 Tab。
+        -   如果是按钮点击（如 "Allow"），发送模拟按键及回车。
+
+3.  **BurntToast 模块**:
+    -   **作用**: 第三方 PowerShell 模块，用于替代受限的原生 WinRT API，支持高级 Toast 功能（如按钮、自定义音频）。
+
+## 3. 核心功能
+
+### 3.1 智能延迟 (Smart Delay)
+**配置参数**: `-Delay [Seconds]`
+**工作原理**:
+-   **传统延迟**: 死等 N 秒。
+-   **智能延迟**: 脚本进入轮询循环（每秒一次）。
+    -   **即时打断**: 如果在等待期间检测到用户切换回 Claude 窗口，脚本**立即退出**，取消通知。
+    -   **超时发送**: 只有在延迟时间结束且用户仍未回来时，才发送通知。
+**优势**: 避免了"人就在电脑前却还要被倒计时阻塞"的尴尬，实现了真正的免打扰。
+
+### 3.2 交互式通知 (Interactive Toasts)
+**触发场景**: 权限请求 (Permission Prompt)。
+**功能**:
+-   **Allow**: 激活 Claude 窗口并自动输入 `1`。
+-   **Dismiss**: 仅关闭通知，不进行任何操作。
+-   **Click Body**: 点击通知文字区域激活 Claude 窗口，但不输入任何指令（适用于手动选择 Option 2/3）。
+
+### 3.3 调试模式 (Debug Hook)
+**配置参数**: `-EnableDebug`
+**功能**:
+-   在 `~\.claude\toast_debug.log` 中记录详细的运行日志。
+-   包括：Payload 解析、前台进程检测、模块加载路径、UI Automation 查找结果等。
+-   **自动传播**: Launcher 脚本会自动将调试开关传递给 Worker 进程和 Protocol Handler。
+
+### 3.4 防死锁机制 (Blocking Wait Timeout)
+**配置参数**: `-Wait`
+**功能**:
+-   通知发送后，脚本会等待用户点击。
+-   **30秒超时**: 如果 30 秒内用户没有操作，脚本自动退出，Claude Code 恢复运行（Auto-Resume）。
+-   确保 Claude 不会因为用户离开座位而无限卡死。
+
+## 4. 推荐配置
+
+请将以下命令配置到 Claude Code 的 `settings.json` 中：
+
+```json
+"command": "powershell -ExecutionPolicy Bypass -File \"C:/Users/Xiao/.claude/hooks/windows-notification.ps1\" -AudioPath \"C:/Users/Xiao/OneDrive/Aurora.wav\" -Wait -Delay 10 -EnableDebug"
+```
+
+**参数说明**:
+-   `-ExecutionPolicy Bypass`: 允许运行未签名脚本。
+-   `-AudioPath "..."`: 自定义通知音效。
+-   `-Wait`: 等待脚本执行完毕（启用防死锁等待）。
+-   `-Delay 10`: 开启 10 秒智能延迟。
+-   `-EnableDebug`: 开启调试日志（稳定后可移除）。
+
+## 5. 常见问题排查
+
+### Q: 为什么通知没弹出来？
+**A**:
+1.  检查日志 `~\.claude\toast_debug.log`。
+2.  确认 `Delay` 期间你是否切回了窗口（Feature, not bug）。
+3.  确认 PowerShell 能找到 `BurntToast` 模块。
+
+### Q: 为什么点击通知没反应？
+**A**:
+1.  检查注册表 `HKEY_CLASSES_ROOT\claude-runner` 是否正确指向 [protocol-handler.ps1](file:///C:/Users/Xiao/.claude/hooks/protocol-handler.ps1)。
+2.  检查 `protocol_debug.log`（如果启用了 Debug）。
+3.  确认 Windows Terminal 是否以管理员身份运行（可能导致 UIA 权限问题）。
+
+## 6. 设计决策记录
+
+-   **UI Automation vs `wt.exe`**: 选择了 UIA，因为 `wt.exe` 无法从外部控制特定 Tab 的激活，且无法获取窗口句柄。
+-   **BurntToast vs WinRT**: 选择了 BurntToast，因为原生 WinRT 在 PowerShell 中调用复杂且对 AppId 注册有严格限制，导致按钮无法显示。
+-   **Smart Delay实现**: 选择了轮询 (`While loop`) 而非 `Start-Sleep`，以实现毫秒级的响应打断。
+
+## 7. 目录结构
+
+清理后的 recommended hooks 目录结构：
+
+\\\	ext
+hooks/
+├── windows-notification.ps1  # 核心：处理所有的通知逻辑
+├── protocol-handler.ps1      # 核心：处理点击回调
+├── runner.vbs                # 核心：静默启动器
+
+├── register-protocol.ps1     # 维护：注册 URL 协议
+└── _archive/                 # 归档：历史版本与测试脚本
+\\\
+
+
+
+
+
