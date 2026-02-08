@@ -263,9 +263,14 @@ function Write-DebugLog([string]$Message) {
 # 1. Process Input
 Write-DebugLog "--- LAUNCHER ---"
 try {
+    
     $Payload = $null
-    if ($InputObject) { if ($InputObject -is [string]) { $Payload = $InputObject | ConvertFrom-Json -ErrorAction SilentlyContinue } else { $Payload = $InputObject } }
-    elseif ($input) { $RawInput = $input | Out-String; if (-not [string]::IsNullOrWhiteSpace($RawInput)) { $Payload = $RawInput | ConvertFrom-Json -ErrorAction SilentlyContinue } }
+    if ($InputObject) { 
+        if ($InputObject -is [string]) { $Payload = $InputObject | ConvertFrom-Json -ErrorAction SilentlyContinue } else { $Payload = $InputObject } 
+    }
+    elseif ($input) { 
+        $RawInput = $input | Out-String; if (-not [string]::IsNullOrWhiteSpace($RawInput)) { $Payload = $RawInput | ConvertFrom-Json -ErrorAction SilentlyContinue } 
+    }
 
     # DEBUG: 记录 Payload 完整内容
     if ($Payload) {
@@ -394,6 +399,11 @@ try {
                     $Line = $TranscriptLines[$i]; if ([string]::IsNullOrWhiteSpace($Line)) { continue }
                     try {
                         $Entry = $Line | ConvertFrom-Json
+                        
+                        # STOP CONDITION: If we hit a user message, we've gone back too far.
+                        # (Avoid picking up stale assistant text from previous turn)
+                        if ($Entry.type -eq 'user' -and $Entry.message) { break }
+
                         if ($Entry.type -eq 'assistant' -and $Entry.message) { $Content = $Entry.message.content } elseif ($Entry.type -eq 'message' -and $Entry.role -eq 'assistant') { $Content = $Entry.content } else { $Content = $null }
                         if ($Content) {
                             # 提取回答时间
@@ -418,34 +428,51 @@ try {
                                 # 根据工具类型提取详细信息
                                 $Detail = ""
                                 $Description = ""
-                                switch ($ToolName) {
-                                    "Bash" {
+                                switch -Regex ($ToolName) {
+                                    "^Bash$" {
                                         if ($ToolInput.command) { $Detail = $ToolInput.command }
                                         if ($ToolInput.description) { $Description = $ToolInput.description }
                                     }
-                                    "Read" {
+                                    "^Read$" {
                                         if ($ToolInput.file_path) { $Detail = $ToolInput.file_path }
+                                        if ($ToolInput.description) { $Description = $ToolInput.description }
                                     }
-                                    "Write" {
+                                    "^Write$" {
                                         if ($ToolInput.file_path) { $Detail = "Write: " + $ToolInput.file_path }
+                                        if ($ToolInput.description) { $Description = $ToolInput.description }
                                     }
-                                    "Edit" {
+                                    "^Edit$" {
                                         if ($ToolInput.file_path) { $Detail = "Edit: " + $ToolInput.file_path }
+                                        if ($ToolInput.description) { $Description = $ToolInput.description }
                                     }
-                                    "Grep" {
+                                    "^Grep$" {
                                         if ($ToolInput.pattern) { $Detail = "Search: " + $ToolInput.pattern }
+                                        if ($ToolInput.description) { $Description = $ToolInput.description }
                                     }
-                                    "WebSearch" {
+                                    "WebSearch|google_search" {
                                         if ($ToolInput.query) { $Detail = "Search: " + $ToolInput.query }
-                                    }
-                                    "mcp__Serper_MCP_Server__google_search" {
-                                        if ($ToolInput.q) { $Detail = "Search: " + $ToolInput.q }
+                                        elseif ($ToolInput.q) { $Detail = "Search: " + $ToolInput.q }
                                     }
                                     default {
+                                        # 通用回退：尝试常见字段
                                         if ($ToolInput.description) { $Detail = $ToolInput.description }
                                         elseif ($ToolInput.file_path) { $Detail = $ToolInput.file_path }
                                         elseif ($ToolInput.path) { $Detail = $ToolInput.path }
                                         elseif ($ToolInput.url) { $Detail = $ToolInput.url }
+                                        elseif ($ToolInput.input) { $Detail = $ToolInput.input } # 某些工具直接用 input 字段
+                                        elseif ($ToolInput.content) { 
+                                            # 如果只有 content 且不长，也可以用
+                                            $c = $ToolInput.content
+                                            if ($c.Length -lt 50) { $Detail = $c } else { $Detail = "Content..." }
+                                        }
+                                        else {
+                                            #最后手段：将整个 input 转为紧凑 JSON
+                                            try { 
+                                                $Json = $ToolInput | ConvertTo-Json -Depth 1 -Compress 
+                                                if ($Json.Length -gt 50) { $Json = $Json.Substring(0, 47) + "..." }
+                                                $Detail = $Json
+                                            } catch { $Detail = "Complex Input" }
+                                        }
                                     }
                                 }
 
@@ -465,32 +492,40 @@ try {
                                     $ToolUseInfo = "[$ToolName] $Combined"
                                     Write-DebugLog "ToolUseInfo set to: $ToolUseInfo"
                                 }
-
-                                # 找到 tool_use 后立即跳出，不需要继续查找 text
-                                break
                             }
 
-                            # 回退：提取 text 内容（如果没有 tool_use）
+                            # 提取 text 内容（无论是否有 tool_use 都尝试提取，用于组合或回退）
                             $LastText = $Content | Where-Object { $_.type -eq 'text' } | Select-Object -ExpandProperty text -Last 1
                             if ($LastText) {
                                 # Clean Markdown formatting (保留代码块内容，只删除格式标记)
                                 $CleanText = $LastText -replace '#{1,6}\s*', '' -replace '\*{1,2}([^*]+)\*{1,2}', '$1' -replace '```[a-z]*\r?\n?', '' -replace '`([^`]+)`', '$1' -replace '\[([^\]]+)\]\([^)]+\)', '$1' -replace '^\s*[-*]\s+', '' -replace '\r?\n', ' '
                                 $CleanText = $CleanText.Trim()
-                                if ($CleanText.Length -gt 500) { $CleanText = $CleanText.Substring(0, 497) + "..." }
-                                if ($CleanText) { $Message = "A: [$ResponseTime] $CleanText" }
-                                break
+                                if ($CleanText.Length -gt 800) { $CleanText = $CleanText.Substring(0, 797) + "..." }
+                                # 格式化 Text 消息
+                                $TextMessage = if ($ResponseTime) { "A: [$ResponseTime] $CleanText" } else { "A: $CleanText" }
+                            }
+
+                            # 决策最终显示的消息
+                            if ($TextMessage -and $ToolUseInfo) {
+                                # FIX: 对于 Permission Prompt，忽略 TextMessage，防止显示上一轮的 stale text
+                                if ($Payload.notification_type -eq 'permission_prompt') {
+                                    $Message = $ToolUseInfo
+                                } else {
+                                    $Message = "$TextMessage  $ToolUseInfo"
+                                }
+                            } elseif ($TextMessage) {
+                                $Message = $TextMessage
+                            } elseif ($ToolUseInfo) {
+                                $Message = $ToolUseInfo
+                            }
+
+                            # 如果我们找到了有效内容（Text 或 Tool），就停止搜索更早的消息
+                            if ($Message -ne "Task finished.") {
                             }
                         }
                     } catch {}
                 }
 
-                # 如果找到 tool_use 信息，优先使用
-                if ($ToolUseInfo) {
-                    $Message = $ToolUseInfo
-                    Write-DebugLog "Final Message set from ToolUseInfo: $Message"
-                }
-                
-                # 3. Extract Last User Message (用于 Title)
                 for ($i = $TranscriptLines.Count - 1; $i -ge 0; $i--) {
                     $Line = $TranscriptLines[$i]; if ([string]::IsNullOrWhiteSpace($Line)) { continue }
                     try {
@@ -542,9 +577,22 @@ try {
             
             # 构建详细 Message
             if ($ToolDetail) {
-                # 截断过长的命令
-                if ($ToolDetail.Length -gt 200) { $ToolDetail = $ToolDetail.Substring(0, 197) + "..." }
-                $Message = "[$ToolName] $ToolDetail"
+                # 截断过长的命令 (增加到 400)
+                if ($ToolDetail.Length -gt 400) { $ToolDetail = $ToolDetail.Substring(0, 397) + "..." }
+                
+                # 组合 Payload.message (Description) 和 ToolDetail
+                if ($Payload.message) {
+                    $Desc = $Payload.message
+                    # 增加到 800 以支持悬停查看更多
+                    if ($Desc.Length -gt 800) { $Desc = $Desc.Substring(0, 797) + "..." }
+                    
+                    # 格式:
+                    # Description text...
+                    # [Tool] Command...
+                    $Message = "$Desc`r`n[$ToolName] $ToolDetail"
+                } else {
+                    $Message = "[$ToolName] $ToolDetail"
+                }
             } elseif (-not $Payload.message) {
                 $Message = "Permission: $ToolName"
             }
@@ -749,8 +797,8 @@ try {
         Start-Sleep -Seconds 2
 
         # 2. Focus Loop - Check if ANY IDE/Terminal window is focused
-        # 添加超时机制避免无限阻塞（30秒后自动恢复）
-        $TimeoutSeconds = 30
+        # 添加超时机制避免无限阻塞（10秒后自动恢复）
+        $TimeoutSeconds = 10
         $ElapsedMs = 0
         while ($ElapsedMs -lt ($TimeoutSeconds * 1000)) {
             $CurrentFg = [WinApi]::GetForegroundWindow()
