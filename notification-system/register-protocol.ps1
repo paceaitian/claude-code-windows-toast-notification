@@ -2,7 +2,7 @@
 
 $ProtocolName = "claude-runner"
 # Point to Main Runner
-$VbsPath = "$env:USERPROFILE\.claude\hooks\runner.vbs"
+$VbsPath = "$env:USERPROFILE\.claude\hooks\notification-system\runner.vbs"
 
 # Registry Keys
 $HKCU = "HKCU:\Software\Classes"

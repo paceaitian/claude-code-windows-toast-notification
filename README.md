@@ -23,10 +23,10 @@
 - **`Lib/Transcript.ps1`**: **解析核心**。提取上下文信息（如提取 `[Bash] rm -rf` 命令详情）。
 - **`Lib/Toast.ps1`**: **UI 核心**。调用 BurntToast 显示通知，并绑定点击事件到协议。
 
-### 2. 协议处理器 (`hooks/protocol-handler.ps1`)
+### 2. 协议处理器 (`hooks/notification-system/ProtocolHandler.ps1`)
 负责响应通知点击事件。
 - 当用户点击 Toast 通知或按钮（如 "Proceed"）时，系统触发 `claude-runner://` 协议。
-- **`protocol-handler.ps1`**: 接收协议请求，自动查找并激活对应的 Windows Terminal 窗口/标签页，甚至自动发送确认键（如 `y` 或 `Enter`）。
+- **`ProtocolHandler.ps1`**: 接收协议请求，自动查找并激活对应的 Windows Terminal 窗口/标签页，甚至自动发送确认键（如 `y` 或 `Enter`）。
 
 ## 🚀 安装与配置 (Installation)
 
@@ -34,7 +34,7 @@
 为了让点击通知能跳转回 Claude，需要注册自定义协议。
 在 PowerShell (管理员) 中运行：
 ```powershell
-cd ~/.claude/hooks
+cd ~/.claude/hooks/notification-system
 .\register-protocol.ps1
 ```
 
@@ -77,6 +77,27 @@ cd ~/.claude/hooks
 
 3.  **静音回退**
     *   如果找不到音频文件，则仅显示静音通知。
+
+## 🤫 静音控制 (Suppress Notifications)
+
+您可以通过以下两种方式临时或永久禁用通知：
+
+### 1. 环境变量控制 (临时)
+设置环境变量 `CLAUDE_NO_NOTIFICATION=1` 即可禁用所有通知。
+适用于 CI/CD 或特定脚本启动场景。
+
+**示例 (PowerShell Profile)**:
+```powershell
+function happy {
+    $env:CLAUDE_NO_NOTIFICATION = '1'
+    try { & 'claude' @args } finally { $env:CLAUDE_NO_NOTIFICATION = '' }
+}
+```
+
+### 2. 项目级配置文件 (持久)
+在项目根目录的 `.claude/` 文件夹下创建一个名为 `no-notification` 的空文件。
+系统检测到该文件存在时，会自动跳过该项目的所有通知。
+适用于不需要通知的特定项目。
 
 ## ⚙️ 参数说明 (Parameters)
 
