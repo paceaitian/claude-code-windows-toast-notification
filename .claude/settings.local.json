@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(powershell -ExecutionPolicy Bypass -Command \"Set-Location ''C:\\\\Users\\\\Xiao\\\\.claude\\\\hooks''; & ''C:\\\\Users\\\\Xiao\\\\.claude\\\\hooks\\\\common-helpers.ps1''; Write-Host ''语法检查通过''\")"
+    ]
+  }
+}
