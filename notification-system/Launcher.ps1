@@ -1,7 +1,9 @@
 param(
-    [Parameter(Mandatory=$false, Position=0)] [string]$Title = "Claude Notification",
-    [Parameter(Mandatory=$false, Position=1)] [string]$Message = "Task finished.",
-    [string]$AudioPath,
+    [Parameter(Mandatory=$false, Position=0)] [string]$ProjectName_Or_Title,
+    [Parameter(Mandatory=$false, Position=1)] [string]$TranscriptPath_Or_Message,
+    [Parameter(Mandatory=$false, Position=2)] [string]$Cost,
+    [Parameter(Mandatory=$false, Position=3)] [string]$Duration,
+    
     [Parameter(ValueFromPipeline=$true)] [psobject]$InputObject,
     
     # Flags
@@ -17,22 +19,50 @@ $Dir = Split-Path $MyInvocation.MyCommand.Path
 
 Write-DebugLog "--- LAUNCHER (MODULAR) ---"
 
-# 1. Parse Input
+# 1. Parse Input & Arguments
 try {
-    $Payload = $null
+    $Payload = @{}
+    
+    # Priority: Pipeline/InputObject > Positional Args
     if ($InputObject) {
-        if ($InputObject -is [string]) { $Payload = $InputObject | ConvertFrom-Json -ErrorAction SilentlyContinue } else { $Payload = $InputObject }
+        if ($InputObject -is [string]) { 
+            $Payload = $InputObject | ConvertFrom-Json -ErrorAction SilentlyContinue 
+        } else { 
+            $Payload = $InputObject 
+        }
     } elseif ($input) {
-        $Raw = $input | Out-String; if (-not [string]::IsNullOrWhiteSpace($Raw)) { $Payload = $Raw | ConvertFrom-Json -ErrorAction SilentlyContinue }
+        $Raw = $input | Out-String; if (-not [string]::IsNullOrWhiteSpace($Raw)) { 
+            $Payload = $Raw | ConvertFrom-Json -ErrorAction SilentlyContinue 
+        }
     }
-} catch {}
+
+    # If Payload is empty/null, use Positional Args (Legacy Hook Mode)
+    if (-not $Payload -or $Payload.Count -eq 0) {
+        $Payload = @{}
+        if ($ProjectName_Or_Title) { $Payload['project_name'] = $ProjectName_Or_Title }
+        if ($TranscriptPath_Or_Message) {
+            # Heuristic: Is it a path?
+            if ($TranscriptPath_Or_Message -match "^[a-zA-Z]:\\" -or $TranscriptPath_Or_Message -match "^\\\\") {
+                $Payload['transcript_path'] = $TranscriptPath_Or_Message
+            } else {
+                $Payload['message'] = $TranscriptPath_Or_Message
+            }
+        }
+        if ($Cost) { $Payload['cost'] = $Cost }
+        if ($Duration) { $Payload['duration'] = $Duration }
+    }
+} catch { Write-DebugLog "Launcher Input Error: $_" }
 
 # 2. Extract Project info
 $ProjectName = "Claude"
 if ($Payload.project_name) { $ProjectName = $Payload.project_name }
+elseif ($Payload.title) { $ProjectName = $Payload.title } # Fallback if Title was passed as Arg 0 but meant as Title
 elseif ($Payload.projectPath) { $ProjectName = Split-Path $Payload.projectPath -Leaf }
 elseif ($Payload.project_dir) { $ProjectName = Split-Path $Payload.project_dir -Leaf }
-if ($ProjectName -eq "Claude" -and $env:CLAUDE_PROJECT_DIR) { $ProjectName = Split-Path $env:CLAUDE_PROJECT_DIR -Leaf }
+
+if ($ProjectName -eq "Claude" -and $env:CLAUDE_PROJECT_DIR) { 
+    $ProjectName = Split-Path $env:CLAUDE_PROJECT_DIR -Leaf 
+}
 
 # 3. Find Interactive Shell (PID)
 $TargetPid = 0
@@ -86,6 +116,10 @@ if ($TargetPid -gt 0) {
 if ($Payload.notification_type) { $NotificationType = $Payload.notification_type }
 if ($Payload.title) { $Title = $Payload.title }
 if ($Payload.message) { $Message = $Payload.message }
+
+# Ensure Defaults
+if (-not $Title) { $Title = "Claude Notification" }
+if (-not $Message) { $Message = "Task finished." }
 
 $B64Title = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Title))
 $B64Message = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Message))

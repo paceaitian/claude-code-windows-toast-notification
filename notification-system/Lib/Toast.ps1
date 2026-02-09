@@ -44,6 +44,17 @@ function Send-ClaudeToast {
     if ($TargetPid -gt 0) { $LaunchUri += "&pid=$TargetPid" }
     if ($NotificationType) { $LaunchUri += "&notification_type=$NotificationType" }
 
+    # 3. Audio Logic
+    # Priority: Explicit AudioPath > Permission Prompt (Aurora) > Default Silent (controlled by BurntToast)
+    $FinalSoundPath = $null
+
+    if ($AudioPath -and (Test-Path $AudioPath)) {
+        $FinalSoundPath = $AudioPath
+    } elseif ($NotificationType -eq 'permission_prompt') {
+        $AuroraPath = "$env:USERPROFILE\OneDrive\Aurora.mp3"
+        if (Test-Path $AuroraPath) { $FinalSoundPath = $AuroraPath }
+    }
+
     try {
         $Text1 = New-BTText -Text $Title
         $Text2 = New-BTText -Text $Message
@@ -56,21 +67,25 @@ function Send-ClaudeToast {
         # Buttons
         $Actions = $null
         if ($NotificationType -eq "permission_prompt") {
-            $Btn1 = New-BTButton -Content 'Allow' -Arguments "$LaunchUri&button=1" -ActivationType Protocol
+            # Use specific button ID for protocol handler to recognize
+            $Btn1 = New-BTButton -Content 'Proceed' -Arguments "action=approve&pid=$TargetPid" -ActivationType Protocol
             $BtnDismiss = New-BTButton -Dismiss -Content 'Dismiss'
             $Actions = New-BTAction -Buttons $Btn1, $BtnDismiss
-        } else {
-            $BtnDismiss = New-BTButton -Dismiss
-            $Actions = New-BTAction -Buttons $BtnDismiss
         }
 
-        $Content = New-BTContent -Visual $Visual -Actions $Actions -Audio (New-BTAudio -Silent) `
+        # Audio Configuration
+        $Audio = if ($FinalSoundPath) { New-BTAudio -Silent } else { New-BTAudio -Source Default }
+
+        $Content = New-BTContent -Visual $Visual -Actions $Actions -Audio $Audio `
             -ActivationType Protocol -Launch $LaunchUri -Scenario Reminder
 
         Submit-BTNotification -Content $Content
+        
+        # Play Custom Sound
+        if ($FinalSoundPath) {
+            $Player = New-Object System.Media.SoundPlayer $FinalSoundPath
+            $Player.Play() # Async play
+        }
     } catch { Write-DebugLog "Toast Error: $_" }
 
-    if ($AudioPath -and (Test-Path $AudioPath)) {
-        try { (New-Object System.Media.SoundPlayer $AudioPath).PlaySync() } catch {}
-    }
 }

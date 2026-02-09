@@ -20,87 +20,123 @@ function Get-ClaudeTranscriptInfo {
         $TextMessage = $null
         
         # 1. Extract Last Assistant Message
+        # We iterate backwards to find the *last* relevant assistant action.
         for ($i = $TranscriptLines.Count - 1; $i -ge 0; $i--) {
             $Line = $TranscriptLines[$i]; if ([string]::IsNullOrWhiteSpace($Line)) { continue }
             try {
                 $Entry = $Line | ConvertFrom-Json
                 
-                # STOP if User Message found
+                # STOP if User Message found (boundary of current turn)
                 if ($Entry.type -eq 'user' -and $Entry.message) { break }
 
-                if ($Entry.type -eq 'assistant' -and $Entry.message) { $Content = $Entry.message.content } elseif ($Entry.type -eq 'message' -and $Entry.role -eq 'assistant') { $Content = $Entry.content } else { $Content = $null }
-                
+                # Normalize Content
+                $Content = $null
+                # Standard Message Format
+                if ($Entry.type -eq 'assistant' -and $Entry.message) { 
+                    $Content = $Entry.message.content 
+                } 
+                # Legacy / Alternative Format
+                elseif ($Entry.type -eq 'message' -and $Entry.role -eq 'assistant') { 
+                    $Content = $Entry.content 
+                }
+
                 if ($Content) {
+                    # Extract Timestamp
                     if ($Entry.timestamp -and -not $ResponseTime) {
                         try { $ResponseTime = [DateTime]::Parse($Entry.timestamp).ToLocalTime().ToString("HH:mm") } catch {}
                     }
 
-                    # Tool Info
+                    # --- TOOL EXTRACTION ---
+                    # Prioritize Tool Use over Text for "Action" notifications
                     $ToolUse = $Content | Where-Object { $_.type -eq 'tool_use' } | Select-Object -First 1
                     if ($ToolUse) {
                         $ToolName = $ToolUse.name
                         $ToolInput = $ToolUse.input
                         
-                        $Detail = ""; $Description = ""
-                        if ($ToolInput.description) { $Description = $ToolInput.description }
-                        
-                        if ($ToolName -match "^Bash$") { if ($ToolInput.command) { $Detail = $ToolInput.command } }
-                        elseif ($ToolName -match "^(Read|Write|Edit)$") { if ($ToolInput.file_path) { $Detail = "$ToolName " + $ToolInput.file_path } }
-                        elseif ($ToolName -match "Search") { if ($ToolInput.query) { $Detail = $ToolInput.query } }
-                        elseif ($ToolName -eq "Task") {
-                                # Special handling for Subagent Tasks
+                        $Detail = ""
+                        $Description = ""
+
+                        # Heuristic Mapping
+                        switch -Regex ($ToolName) {
+                            "^Bash$" {
+                                if ($ToolInput.command) { $Detail = $ToolInput.command }
+                            }
+                            "^(Read|Write|Edit)(_file)?$" {
+                                if ($ToolInput.file_path) { 
+                                    $Action = $Matches[1]
+                                    $Detail = "$Action " + (Split-Path $ToolInput.file_path -Leaf)
+                                }
+                            }
+                            "^Grep(_search)?$" {
+                                if ($ToolInput.pattern) { $Detail = "Search: " + $ToolInput.pattern }
+                            }
+                            "^Task$" {
+                                # Subagent
                                 if ($ToolInput.subagent_type) {
                                     $RawName = ($ToolInput.subagent_type -split ":")[-1]
-                                    if ($RawName.Length -gt 0) {
-                                        $ToolName = $RawName.Substring(0,1).ToUpper() + $RawName.Substring(1)
-                                    } else {
-                                        $ToolName = $RawName
-                                    }
+                                    $ToolName = $RawName.Substring(0,1).ToUpper() + $RawName.Substring(1)
                                 }
+                                # Use description for Detail if available
                                 if ($ToolInput.description) { $Detail = $ToolInput.description }
-                        }
-                        else { 
-                                if ($ToolInput.input) { $Detail = $ToolInput.input }
-                                elseif ($ToolInput.path) { $Detail = $ToolInput.path }
-                        }
-                        
-                        if (-not $Detail -and -not $Description) {
-                                $json = $ToolInput | ConvertTo-Json -Depth 1 -Compress
-                                if ($json.Length -gt 50) { $Detail = $json.Substring(0,47) + "..." } else { $Detail = $json }
+                                elseif ($ToolInput.prompt) { 
+                                    $Detail = $ToolInput.prompt 
+                                    if ($Detail.Length -gt 50) { $Detail = $Detail.Substring(0,47) + "..." }
+                                }
+                            }
+                            "WebSearch|google_search" {
+                                if ($ToolInput.query) { $Detail = "Search: " + $ToolInput.query }
+                            }
+                            default {
+                                # Generic Fallback
+                                if ($ToolInput.path) { $Detail = $ToolInput.path }
+                                elseif ($ToolInput.command) { $Detail = $ToolInput.command }
+                                elseif ($ToolInput.input) { $Detail = $ToolInput.input }
+                            }
                         }
 
-                        $Combined = ""
-                        if ($Detail) { $Combined = $Detail }
-                        if ($Description) { if ($Combined) { $Combined += " - " }; $Combined += $Description }
-                        if ($Combined.Length -gt 200) { $Combined = $Combined.Substring(0, 197) + "..." }
+                        # Fallback for Detail
+                        if (-not $Detail -and $Description) { $Detail = $Description }
                         
-                        $ToolUseInfo = "[$ToolName] $Combined"
+                        # formatting
+                        if ($Detail.Length -gt 400) { $Detail = $Detail.Substring(0, 397) + "..." }
+                        
+                        $ToolUseInfo = "[$ToolName] $Detail"
                     }
 
-                    # Text Info
+                    # --- TEXT EXTRACTION ---
                     $LastText = $Content | Where-Object { $_.type -eq 'text' } | Select-Object -ExpandProperty text -Last 1
                     if ($LastText) {
                             $CleanText = $LastText -replace '#{1,6}\s*', '' -replace '\*{1,2}([^*]+)\*{1,2}', '$1' -replace '```[a-z]*\r?\n?', '' -replace '`([^`]+)`', '$1' -replace '\[([^\]]+)\]\([^)]+\)', '$1' -replace '^\s*[-*]\s+', '' -replace '\r?\n', ' '
                             $CleanText = $CleanText.Trim()
                             if ($CleanText.Length -gt 800) { $CleanText = $CleanText.Substring(0, 797) + "..." }
+                            
+                            # Prefix
                             $TextMessage = if ($ResponseTime) { "A: [$ResponseTime] $CleanText" } else { "A: $CleanText" }
                     }
 
-                    # Compose
-                    if ($TextMessage -and $ToolUseInfo) {
-                        # Determine Type
-                        if ($ToolName -match "Wait" -or ($TextMessage -match "Proceed")) {
-                            $Result.NotificationType = 'permission_prompt'
-                        }
-                        
-                        if ($Result.NotificationType -eq 'permission_prompt') {
-                                $Desc = $TextMessage -replace '^A: (\[.*?\] )?', ''
-                                $Result.Message = "$ToolUseInfo - $Desc"
+                    # --- COMPOSE NOTIFICATION ---
+                    # Priority: Permission > Tool > Text
+                    
+                    # Check for Permission Prompt Context
+                    # (Usually signaled by 'Wait' tool or text like 'Proceed?')
+                    # But we also rely on $NotificationType passed from Launcher/Payload.
+                    # Here we just detect *potential* permission context from text.
+                    $IsPermissionContext = ($TextMessage -match "(permission|approve|proceed|allow|confirm)")
+
+                    if ($ToolUseInfo) {
+                        if ($TextMessage -and $IsPermissionContext) {
+                            # "I need permission to run this..."
+                            # Output: "[Bash] rm -rf / - I need permission..."
+                            $Desc = $TextMessage -replace '^A: (\[.*?\] )?', ''
+                            $Result.Message = "$ToolUseInfo - $Desc"
+                            $Result.NotificationType = 'permission_prompt' # Infer type if not set
                         } else {
-                                $Result.Message = "$ToolUseInfo  $TextMessage"
+                            # Just a tool use (e.g. "I will list files" + [Bash] ls)
+                            $Result.Message = "$ToolUseInfo"
                         }
-                    } elseif ($TextMessage) { $Result.Message = $TextMessage }
-                    elseif ($ToolUseInfo) { $Result.Message = $ToolUseInfo }
+                    } elseif ($TextMessage) {
+                        $Result.Message = $TextMessage
+                    }
 
                     if ($Result.Message -ne "Task finished.") { break } 
                 }
