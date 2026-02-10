@@ -24,8 +24,8 @@ function Test-SensitiveContent([string]$str) {
         if ($str -match "(?i)$field\s*[=:]") { return $true }
     }
 
-    # 检查常见敏感值模式（如 sk-xxx, ghp_xxx 等）
-    if ($str -match "(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36,}|gho_[a-zA-Z0-9]{36,})") { return $true }
+    # 检查常见敏感值模式（如 sk-xxx, ghp_xxx, AWS Key, JWT 等）
+    if ($str -match "(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36,}|gho_[a-zA-Z0-9]{36,}|AKIA[0-9A-Z]{16}|eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,})") { return $true }
 
     return $false
 }

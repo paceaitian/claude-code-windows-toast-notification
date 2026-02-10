@@ -33,8 +33,14 @@ try {
             $Payload = $InputObject
         }
     } elseif ($input) {
-        $Raw = $input | Out-String; if (-not [string]::IsNullOrWhiteSpace($Raw)) {
-            $Payload = $Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
+        $Raw = $input | Out-String
+        if (-not [string]::IsNullOrWhiteSpace($Raw)) {
+            try {
+                $Payload = $Raw | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                Write-DebugLog "Pipeline JSON Parse Error: $_"
+                $Payload = @{}
+            }
         }
     }
 
@@ -100,16 +106,36 @@ for ($i=0; $i -lt $MaxDepth; $i++) {
     } catch { break }
 }
 
-# 4. Inject Title (Immediate)
+# 4. Inject Title (Immediate) - 尊重用户自定义标题
+$UserCustomTitle = $false
+$ActualTitle = $ProjectName
+
 if ($TargetPid -gt 0) {
     [WinApi]::FreeConsole() | Out-Null
     if ([WinApi]::AttachConsole($TargetPid)) {
         try {
-            [Console]::Title = $ProjectName
-            $Osc = "$([char]27)]0;$ProjectName$([char]7)"
-            [Console]::Write($Osc)
-            [Console]::Out.Flush()
-            Write-DebugLog "Launcher: Injected Title '$ProjectName' (Method A+B) into PID $TargetPid"
+            # 读取当前窗口标题
+            $Hwnd = [WinApi]::GetForegroundWindow()
+            $Sb = [System.Text.StringBuilder]::new(256)
+            [WinApi]::GetWindowText($Hwnd, $Sb, 256) | Out-Null
+            $CurrentTitle = $Sb.ToString()
+
+            # 检查是否为默认值
+            if (Test-IsDefaultTitle $CurrentTitle) {
+                # 默认值 → 检测冲突并设置项目名
+                $ActualTitle = Get-UniqueProjectTitle -ProjectName $ProjectName -TargetPid $TargetPid
+
+                [Console]::Title = $ActualTitle
+                $Osc = "$([char]27)]0;$ActualTitle$([char]7)"
+                [Console]::Write($Osc)
+                [Console]::Out.Flush()
+                Write-DebugLog "Launcher: Injected Title '$ActualTitle' (Method A+B) into PID $TargetPid"
+            } else {
+                # 用户已自定义 → 保持不变
+                $UserCustomTitle = $true
+                $ActualTitle = $CurrentTitle
+                Write-DebugLog "Launcher: User custom title detected '$CurrentTitle'. Keeping unchanged."
+            }
         } finally {
             [WinApi]::FreeConsole() | Out-Null
         }
@@ -149,6 +175,14 @@ if ($Delay -gt 0) { $DelayArg = "-Delay $Delay" }
 $TargetPidArg = ""
 if ($TargetPid -gt 0) { $TargetPidArg = "-TargetPid $TargetPid" }
 
+# 用户自定义标题标记
+$SkipTitleArg = ""
+if ($UserCustomTitle) { $SkipTitleArg = "-SkipTitleInjection" }
+
+# 实际使用的窗口标题（用于 Toast URI）
+$EncActualTitle = [Uri]::EscapeDataString($ActualTitle)
+$ActualTitleArg = "-ActualTitle `"$EncActualTitle`""
+
 $AudioArg = ""
 if ($AudioPath) {
     $EncAudio = [Uri]::EscapeDataString($AudioPath)
@@ -173,7 +207,7 @@ if ($Payload.tool_input) {
 # 7. Launch Worker
 $WorkerScript = "$Dir\Worker.ps1"
 
-$WorkerProc = Start-Process "pwsh" -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$WorkerScript`" -Worker -Base64Title `"$B64Title`" -Base64Message `"$B64Message`" -ProjectName `"$EncProject`" -NotificationType `"$NotificationType`" $AudioArg $TranscriptArg $DebugArg $DelayArg $TargetPidArg $ToolNameArg $ToolInputArg"
+$WorkerProc = Start-Process "pwsh" -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$WorkerScript`" -Worker -Base64Title `"$B64Title`" -Base64Message `"$B64Message`" -ProjectName `"$EncProject`" -NotificationType `"$NotificationType`" $AudioArg $TranscriptArg $DebugArg $DelayArg $TargetPidArg $SkipTitleArg $ActualTitleArg $ToolNameArg $ToolInputArg"
 
 # 8. Wait Mode
 if ($Wait) {

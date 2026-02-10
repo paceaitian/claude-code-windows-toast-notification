@@ -1,7 +1,10 @@
 # ProtocolHandler.ps1 - URI 协议处理器
 # 响应 claude-runner:// 协议，激活窗口并处理按钮动作
 
-param([string]$UriArgs)
+param(
+    [string]$UriArgs,
+    [switch]$EnableDebug
+)
 
 # 0. Load Libs
 $Dir = Split-Path $MyInvocation.MyCommand.Path
@@ -51,11 +54,17 @@ try {
         $Proc = Get-Process -Id $PidArg -ErrorAction SilentlyContinue
 
         if ($Proc -and $Proc.MainWindowHandle -ne [IntPtr]::Zero) {
-            if ([WinApi]::IsIconic($Proc.MainWindowHandle)) {
-                [WinApi]::ShowWindow($Proc.MainWindowHandle, 9)
+            $Handle = $Proc.MainWindowHandle
+            # 验证窗口句柄有效性（进程可能在获取后终止）
+            if ([WinApi]::IsWindow($Handle)) {
+                if ([WinApi]::IsIconic($Handle)) {
+                    [WinApi]::ShowWindow($Handle, 9)
+                }
+                $Success = [WinApi]::SetForegroundWindow($Handle)
+                Write-DebugLog "PROTOCOL: SetForegroundWindow(PID_Handle) -> $Success"
+            } else {
+                Write-DebugLog "PROTOCOL: PID $PidArg window handle is no longer valid"
             }
-            $Success = [WinApi]::SetForegroundWindow($Proc.MainWindowHandle)
-            Write-DebugLog "PROTOCOL: SetForegroundWindow(PID_Handle) -> $Success"
         }
 
         # Fallback: AppActivate

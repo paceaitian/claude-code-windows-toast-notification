@@ -14,7 +14,9 @@ param(
     [int]$TargetPid = 0,
     [string]$AudioPath,
     [string]$ToolName,
-    [string]$Base64ToolInput
+    [string]$Base64ToolInput,
+    [switch]$SkipTitleInjection,
+    [string]$ActualTitle
 )
 
 # 0. Load Libs
@@ -31,11 +33,18 @@ $Title = "Claude Notification"
 $Message = "Task finished."
 
 try {
-    if ($Base64Title) { $Title = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Base64Title)) }
-    if ($Base64Message) { $Message = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Base64Message)) }
+    if ($Base64Title) {
+        $DecodedTitle = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Base64Title))
+        if (-not [string]::IsNullOrWhiteSpace($DecodedTitle)) { $Title = $DecodedTitle }
+    }
+    if ($Base64Message) {
+        $DecodedMessage = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Base64Message))
+        if (-not [string]::IsNullOrWhiteSpace($DecodedMessage)) { $Message = $DecodedMessage }
+    }
     if ($ProjectName) { $ProjectName = [Uri]::UnescapeDataString($ProjectName) }
     if ($TranscriptPath) { $TranscriptPath = [Uri]::UnescapeDataString($TranscriptPath) }
     if ($AudioPath) { $AudioPath = [Uri]::UnescapeDataString($AudioPath) }
+    if ($ActualTitle) { $ActualTitle = [Uri]::UnescapeDataString($ActualTitle) }
 
     $ToolInput = $null
     if ($Base64ToolInput) {
@@ -47,13 +56,16 @@ try {
 } catch { Write-DebugLog "Decode Error: $_" }
 
 # 2. Watchdog Logic (Persistent Override)
+# 用于焦点检测的标题（优先使用 ActualTitle，否则使用 ProjectName）
+$TitleForFocusCheck = if ($ActualTitle) { $ActualTitle } else { $ProjectName }
+
 function Test-IsFocused {
     try {
         $Hwnd = [WinApi]::GetForegroundWindow()
         $Sb = [System.Text.StringBuilder]::new(256)
         [WinApi]::GetWindowText($Hwnd, $Sb, 256) | Out-Null
         $CurrentTitle = $Sb.ToString()
-        if ($CurrentTitle -like "*$ProjectName*") { return $true }
+        if ($CurrentTitle -like "*$TitleForFocusCheck*") { return $true }
     } catch {}
     return $false
 }
@@ -76,15 +88,20 @@ if ($TargetPid -gt 0 -and $ProjectName) {
                 $Max = $Delay
                 for ($i = 0; $i -le $Max; $i++) {
 
-                    # A. Force Title (Every Second)
-                    try {
-                        [System.Console]::Title = $ProjectName
-                        $Osc = "$([char]27)]0;$ProjectName$([char]7)"
-                        [System.Console]::Out.Write($Osc)
-                        [System.Console]::Out.Flush()
+                    # A. Force Title (Every Second) - 仅当未跳过时执行
+                    if (-not $SkipTitleInjection) {
+                        try {
+                            $TitleToSet = if ($ActualTitle) { $ActualTitle } else { $ProjectName }
+                            [System.Console]::Title = $TitleToSet
+                            $Osc = "$([char]27)]0;$TitleToSet$([char]7)"
+                            [System.Console]::Out.Write($Osc)
+                            [System.Console]::Out.Flush()
 
-                        if ($i -eq 0) { Write-DebugLog "Watchdog: Title Set '$ProjectName'" }
-                    } catch {}
+                            if ($i -eq 0) { Write-DebugLog "Watchdog: Title Set '$TitleToSet'" }
+                        } catch {}
+                    } else {
+                        if ($i -eq 0) { Write-DebugLog "Watchdog: Skipping title injection (user custom title)" }
+                    }
 
                     # B. Focus Check
                     if (Test-IsFocused) {
@@ -156,8 +173,11 @@ Write-DebugLog "ToolInfo: $ToolInfo"
 Write-DebugLog "Description: $Description"
 
 # 5. Send Toast
+# 使用 ActualTitle（实际窗口标题）用于 Toast URI，确保点击能正确激活窗口
+$WindowTitleForToast = if ($ActualTitle) { $ActualTitle } else { $ProjectName }
+
 Send-ClaudeToast -Title $Title -ToolInfo $ToolInfo -Description $Description `
-                 -ProjectName $ProjectName -AudioPath $AudioPath `
+                 -ProjectName $WindowTitleForToast -AudioPath $AudioPath `
                  -NotificationType $NotificationType -ModulePath $ModulePath `
                  -TargetPid $TargetPid
 

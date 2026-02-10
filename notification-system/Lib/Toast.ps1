@@ -66,8 +66,23 @@ function Send-ClaudeToast {
     }
 
     if (-not (Get-Module BurntToast)) {
-        Write-DebugLog "BurntToast not found. Text-only fallback."
-        Write-Host "[$ProjectName] $Title - $ToolInfo $Description"
+        Write-DebugLog "BurntToast not found. Using Windows balloon fallback."
+        # 使用 Windows 系统托盘气球通知作为 Fallback
+        try {
+            Add-Type -AssemblyName System.Windows.Forms
+            $balloon = New-Object System.Windows.Forms.NotifyIcon
+            $balloon.Icon = [System.Drawing.SystemIcons]::Information
+            $balloon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
+            $balloon.BalloonTipTitle = $Title
+            $balloon.BalloonTipText = "$ToolInfo $Description".Trim()
+            $balloon.Visible = $true
+            $balloon.ShowBalloonTip(5000)
+            # 延迟后清理
+            Start-Sleep -Milliseconds 100
+        } catch {
+            Write-DebugLog "Balloon fallback failed: $_"
+            Write-Host "[$ProjectName] $Title - $ToolInfo $Description"
+        }
         return
     }
 

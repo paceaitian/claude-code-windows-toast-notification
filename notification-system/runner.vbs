@@ -36,7 +36,8 @@ If args.Count > 0 Then
     End If
 
     ' Construct command: pwsh -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ...
-    Command = "pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & HandlerPath & """ """ & ProtoArg & """"
+    ' 添加 -EnableDebug 参数以启用日志记录
+    Command = "pwsh.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & HandlerPath & """ """ & ProtoArg & """ -EnableDebug"
 
     CreateObject("WScript.Shell").Run Command, 0, False
 End If
