@@ -1,8 +1,6 @@
 param(
     [Parameter(Mandatory=$false, Position=0)] [string]$ProjectName_Or_Title,
     [Parameter(Mandatory=$false, Position=1)] [string]$TranscriptPath_Or_Message,
-    [Parameter(Mandatory=$false, Position=2)] [string]$Cost,
-    [Parameter(Mandatory=$false, Position=3)] [string]$Duration,
     
     [Parameter(ValueFromPipeline=$true)] [psobject]$InputObject,
     
@@ -48,8 +46,6 @@ try {
                 $Payload['message'] = $TranscriptPath_Or_Message
             }
         }
-        if ($Cost) { $Payload['cost'] = $Cost }
-        if ($Duration) { $Payload['duration'] = $Duration }
     }
 } catch { Write-DebugLog "Launcher Input Error: $_" }
 
@@ -142,7 +138,23 @@ if ($TargetPid -gt 0) { $TargetPidArg = "-TargetPid $TargetPid" }
 
 # 6. Launch Worker
 $WorkerScript = "$Dir\Worker.ps1"
-$WorkerProc = Start-Process "pwsh" -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$WorkerScript`" -Worker -Base64Title `"$B64Title`" -Base64Message `"$B64Message`" -ProjectName `"$EncProject`" -NotificationType `"$NotificationType`" -AudioPath `"$AudioPath`" $TranscriptArg $DebugArg $DelayArg $TargetPidArg"
+
+# Encode Tool Info (if present)
+$ToolNameArg = ""
+$ToolInputArg = ""
+
+if ($Payload.tool_name) {
+    $ToolNameArg = "-ToolName `"$($Payload.tool_name)`""
+}
+if ($Payload.tool_input) {
+    try {
+        $JsonInput = $Payload.tool_input | ConvertTo-Json -Depth 10 -Compress
+        $B64Input = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($JsonInput))
+        $ToolInputArg = "-Base64ToolInput `"$B64Input`""
+    } catch {}
+}
+
+$WorkerProc = Start-Process "pwsh" -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$WorkerScript`" -Worker -Base64Title `"$B64Title`" -Base64Message `"$B64Message`" -ProjectName `"$EncProject`" -NotificationType `"$NotificationType`" -AudioPath `"$AudioPath`" $TranscriptArg $DebugArg $DelayArg $TargetPidArg $ToolNameArg $ToolInputArg"
 
 if ($Wait) {
     if ($WorkerProc) {

@@ -9,7 +9,9 @@ param(
     [switch]$EnableDebug,
     [int]$Delay = 0,
     [int]$TargetPid = 0,
-    [string]$AudioPath
+    [string]$AudioPath,
+    [string]$ToolName,
+    [string]$Base64ToolInput
 )
 
 # 0. Load Libs
@@ -30,6 +32,12 @@ try {
     if ($Base64Message) { $Message = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Base64Message)) }
     if ($ProjectName) { $ProjectName = [Uri]::UnescapeDataString($ProjectName) }
     if ($TranscriptPath) { $TranscriptPath = [Uri]::UnescapeDataString($TranscriptPath) }
+    
+    $ToolInput = $null
+    if ($Base64ToolInput) {
+        $JsonInput = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Base64ToolInput))
+        if ($JsonInput) { $ToolInput = $JsonInput | ConvertFrom-Json }
+    }
 } catch { Write-DebugLog "Decode Error: $_" }
 
 # 2. Watchdog Logic (Persistent Override)
@@ -101,12 +109,38 @@ if (Test-IsFocused) {
     exit 0
 }
 
-# 4. Transcript Parsing
+# 4. Content Logic (Data Fusion)
+$PayloadMessage = $null
+if ($ToolName) {
+    # A. Payload (Fast & Accurate Tool Info)
+    $PayloadInfo = Get-ClaudeContentFromPayload -ToolName $ToolName -ToolInput $ToolInput -Message $Message
+    if ($PayloadInfo.Message) { 
+        $PayloadMessage = $PayloadInfo.Message 
+        $Message = $PayloadMessage # Set as primary
+    }
+}
+
 if ($TranscriptPath) {
+    # B. Transcript (User Question + Fallback Message)
     $Info = Get-ClaudeTranscriptInfo -TranscriptPath $TranscriptPath -ProjectName $ProjectName
+    
+    # Always take Title (Q: ...) if found, as Payload doesn't have it
     if ($Info.Title) { $Title = $Info.Title }
-    if ($Info.Message) { $Message = $Info.Message }
-    if ($Info.NotificationType) { $NotificationType = $Info.NotificationType }
+    
+    # Only use Transcript Message if Payload failed to provide one
+    if (-not $PayloadMessage -and $Info.Message) { 
+        $Message = $Info.Message 
+    }
+    
+    # Allow Transcript to refine NotificationType if missing
+    if (-not $NotificationType -and $Info.NotificationType) { 
+        $NotificationType = $Info.NotificationType 
+    }
+    
+    # Prepend Transcript time to Payload message (Hybrid Fusion)
+    if ($PayloadMessage -and $Info.ResponseTime) {
+        $Message = "[$($Info.ResponseTime)] $Message"
+    }
 }
 
 Write-DebugLog "Title: $Title"

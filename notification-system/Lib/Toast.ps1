@@ -34,10 +34,12 @@ function Send-ClaudeToast {
     }
 
     if (-not (Get-Module BurntToast)) {
-        Write-DebugLog "BurntToast not found. Text-only fallback."
+        Write-DebugLog "BurntToast not found. Text-only fallback. Cost=$Cost Duration=$Duration"
         Write-Host "[$ProjectName] $Title - $Message"
         return
     }
+
+    Write-DebugLog "Toast: Title='$Title'"
 
     # 2. Construct URI
     $LaunchUri = "claude-runner:focus?windowtitle=$([Uri]::EscapeDataString($ProjectName))"
@@ -51,7 +53,7 @@ function Send-ClaudeToast {
     if ($AudioPath -and (Test-Path $AudioPath)) {
         $FinalSoundPath = $AudioPath
     } elseif ($NotificationType -eq 'permission_prompt') {
-        $AuroraPath = "$env:USERPROFILE\OneDrive\Aurora.mp3"
+        $AuroraPath = "$env:USERPROFILE\OneDrive\Aurora.wav"
         if (Test-Path $AuroraPath) { $FinalSoundPath = $AuroraPath }
     }
 
@@ -61,20 +63,27 @@ function Send-ClaudeToast {
         $Logo = "$env:USERPROFILE\.claude\assets\claude-logo.png"
         $Img = if (Test-Path $Logo) { New-BTImage -Source $Logo -AppLogoOverride -Crop Circle } else { $null }
         
-        $Binding = if ($Img) { New-BTBinding -Children $Text1, $Text2 -AppLogoOverride $Img } else { New-BTBinding -Children $Text1, $Text2 }
+        $Children = @($Text1, $Text2)
+        $Binding = if ($Img) { New-BTBinding -Children $Children -AppLogoOverride $Img } else { New-BTBinding -Children $Children }
         $Visual = New-BTVisual -BindingGeneric $Binding
 
         # Buttons
-        $Actions = $null
-        if ($NotificationType -eq "permission_prompt") {
+        $Buttons = @()
+
+        # 4. Buttons (ALWAYS include Dismiss for Persistence)
+        $DismissBtn = New-BTButton -Content 'Dismiss' -Dismiss
+        
+        if ($NotificationType -eq 'permission_prompt') {
             # Use specific button ID for protocol handler to recognize
-            $Btn1 = New-BTButton -Content 'Proceed' -Arguments "action=approve&pid=$TargetPid" -ActivationType Protocol
-            $BtnDismiss = New-BTButton -Dismiss -Content 'Dismiss'
-            $Actions = New-BTAction -Buttons $Btn1, $BtnDismiss
+            $ApproveBtn = New-BTButton -Content 'Proceed' -Arguments "action=approve&pid=$TargetPid" -ActivationType Protocol
+            $Buttons += $ApproveBtn
         }
+        
+        $Buttons += $DismissBtn
+        $Actions = New-BTAction -Buttons $Buttons
 
         # Audio Configuration
-        $Audio = if ($FinalSoundPath) { New-BTAudio -Silent } else { New-BTAudio -Source Default }
+        $Audio = if ($FinalSoundPath) { New-BTAudio -Silent } else { New-BTAudio -Source 'ms-winsoundevent:Notification.Default' }
 
         $Content = New-BTContent -Visual $Visual -Actions $Actions -Audio $Audio `
             -ActivationType Protocol -Launch $LaunchUri -Scenario Reminder
