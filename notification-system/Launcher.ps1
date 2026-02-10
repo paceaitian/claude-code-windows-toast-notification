@@ -1,13 +1,17 @@
+# Launcher.ps1 - 通知系统启动器
+# 快速入口，负责解析输入、注入窗口标题、启动后台 Worker
+
 param(
     [Parameter(Mandatory=$false, Position=0)] [string]$ProjectName_Or_Title,
     [Parameter(Mandatory=$false, Position=1)] [string]$TranscriptPath_Or_Message,
-    
+
     [Parameter(ValueFromPipeline=$true)] [psobject]$InputObject,
-    
+
     # Flags
     [switch]$EnableDebug,
     [switch]$Wait,
-    [int]$Delay = 0
+    [int]$Delay = 0,
+    [string]$AudioPath
 )
 
 # 0. Load Libs
@@ -20,17 +24,17 @@ Write-DebugLog "--- LAUNCHER (MODULAR) ---"
 # 1. Parse Input & Arguments
 try {
     $Payload = @{}
-    
+
     # Priority: Pipeline/InputObject > Positional Args
     if ($InputObject) {
-        if ($InputObject -is [string]) { 
-            $Payload = $InputObject | ConvertFrom-Json -ErrorAction SilentlyContinue 
-        } else { 
-            $Payload = $InputObject 
+        if ($InputObject -is [string]) {
+            $Payload = $InputObject | ConvertFrom-Json -ErrorAction SilentlyContinue
+        } else {
+            $Payload = $InputObject
         }
     } elseif ($input) {
-        $Raw = $input | Out-String; if (-not [string]::IsNullOrWhiteSpace($Raw)) { 
-            $Payload = $Raw | ConvertFrom-Json -ErrorAction SilentlyContinue 
+        $Raw = $input | Out-String; if (-not [string]::IsNullOrWhiteSpace($Raw)) {
+            $Payload = $Raw | ConvertFrom-Json -ErrorAction SilentlyContinue
         }
     }
 
@@ -52,12 +56,12 @@ try {
 # 2. Extract Project info
 $ProjectName = "Claude"
 if ($Payload.project_name) { $ProjectName = $Payload.project_name }
-elseif ($Payload.title) { $ProjectName = $Payload.title } # Fallback if Title was passed as Arg 0 but meant as Title
+elseif ($Payload.title) { $ProjectName = $Payload.title }
 elseif ($Payload.projectPath) { $ProjectName = Split-Path $Payload.projectPath -Leaf }
 elseif ($Payload.project_dir) { $ProjectName = Split-Path $Payload.project_dir -Leaf }
 
-if ($ProjectName -eq "Claude" -and $env:CLAUDE_PROJECT_DIR) { 
-    $ProjectName = Split-Path $env:CLAUDE_PROJECT_DIR -Leaf 
+if ($ProjectName -eq "Claude" -and $env:CLAUDE_PROJECT_DIR) {
+    $ProjectName = Split-Path $env:CLAUDE_PROJECT_DIR -Leaf
 }
 
 # 3. Find Interactive Shell (PID)
@@ -65,16 +69,19 @@ $TargetPid = 0
 $CurrentId = $PID
 $FoundClaude = $false
 
-for ($i=0; $i -lt 10; $i++) {
+$MaxDepth = $Script:CONFIG_PARENT_PROCESS_MAX_DEPTH
+if (-not $MaxDepth) { $MaxDepth = 10 }
+
+for ($i=0; $i -lt $MaxDepth; $i++) {
     try {
         $Proc = Get-Process -Id $CurrentId -ErrorAction Stop
         $Name = $Proc.ProcessName
-        
+
         # Detect Claude Process in the chain
         if ($Name -match "^(claude|node|claude-code)$") {
             $FoundClaude = $true
         }
-        
+
         # Match common shells
         if ($Name -match "^(cmd|pwsh|powershell|bash)$") {
             if ($FoundClaude) {
@@ -85,10 +92,10 @@ for ($i=0; $i -lt 10; $i++) {
                 Write-DebugLog "Launcher: Skipping Runner Shell L$i '$Name' (PID: $($Proc.Id))"
             }
         }
-        
+
         # P/Invoke Walk Up (Extremely Fast)
         $ParentId = [WinApi]::GetParentPid($CurrentId)
-        if ($ParentId -le 0) { break }
+        if ($ParentId -le 0 -or $ParentId -eq $CurrentId) { break }
         $CurrentId = $ParentId
     } catch { break }
 }
@@ -97,25 +104,31 @@ for ($i=0; $i -lt 10; $i++) {
 if ($TargetPid -gt 0) {
     [WinApi]::FreeConsole() | Out-Null
     if ([WinApi]::AttachConsole($TargetPid)) {
-        try { [Console]::Title = $ProjectName } catch {}
-        $Osc = "$([char]27)]0;$ProjectName$([char]7)"
-        [Console]::Write($Osc)
-        try { [Console]::Out.Flush() } catch {}
-        Write-DebugLog "Launcher: Injected Title '$ProjectName' (Method A+B) into PID $TargetPid"
-        [WinApi]::FreeConsole() | Out-Null
+        try {
+            [Console]::Title = $ProjectName
+            $Osc = "$([char]27)]0;$ProjectName$([char]7)"
+            [Console]::Write($Osc)
+            [Console]::Out.Flush()
+            Write-DebugLog "Launcher: Injected Title '$ProjectName' (Method A+B) into PID $TargetPid"
+        } finally {
+            [WinApi]::FreeConsole() | Out-Null
+        }
     }
 } else {
     Write-DebugLog "Launcher: No suitable Interactive Shell found."
 }
 
 # 5. Prepare Worker Arguments
+$NotificationType = ""
 if ($Payload.notification_type) { $NotificationType = $Payload.notification_type }
+
+$Title = "Claude Notification"
+$Message = "Task finished."
 if ($Payload.title) { $Title = $Payload.title }
 if ($Payload.message) { $Message = $Payload.message }
 
-# Ensure Defaults
-if (-not $Title) { $Title = "Claude Notification" }
-if (-not $Message) { $Message = "Task finished." }
+# Audio Path: 命令行参数优先，其次 Payload
+if (-not $AudioPath -and $Payload.audio_path) { $AudioPath = $Payload.audio_path }
 
 $B64Title = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Title))
 $B64Message = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Message))
@@ -136,10 +149,13 @@ if ($Delay -gt 0) { $DelayArg = "-Delay $Delay" }
 $TargetPidArg = ""
 if ($TargetPid -gt 0) { $TargetPidArg = "-TargetPid $TargetPid" }
 
-# 6. Launch Worker
-$WorkerScript = "$Dir\Worker.ps1"
+$AudioArg = ""
+if ($AudioPath) {
+    $EncAudio = [Uri]::EscapeDataString($AudioPath)
+    $AudioArg = "-AudioPath `"$EncAudio`""
+}
 
-# Encode Tool Info (if present)
+# 6. Encode Tool Info (if present)
 $ToolNameArg = ""
 $ToolInputArg = ""
 
@@ -151,15 +167,27 @@ if ($Payload.tool_input) {
         $JsonInput = $Payload.tool_input | ConvertTo-Json -Depth 10 -Compress
         $B64Input = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($JsonInput))
         $ToolInputArg = "-Base64ToolInput `"$B64Input`""
-    } catch {}
+    } catch { Write-DebugLog "ToolInput Encode Error: $_" }
 }
 
-$WorkerProc = Start-Process "pwsh" -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$WorkerScript`" -Worker -Base64Title `"$B64Title`" -Base64Message `"$B64Message`" -ProjectName `"$EncProject`" -NotificationType `"$NotificationType`" -AudioPath `"$AudioPath`" $TranscriptArg $DebugArg $DelayArg $TargetPidArg $ToolNameArg $ToolInputArg"
+# 7. Launch Worker
+$WorkerScript = "$Dir\Worker.ps1"
 
+$WorkerProc = Start-Process "pwsh" -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$WorkerScript`" -Worker -Base64Title `"$B64Title`" -Base64Message `"$B64Message`" -ProjectName `"$EncProject`" -NotificationType `"$NotificationType`" $AudioArg $TranscriptArg $DebugArg $DelayArg $TargetPidArg $ToolNameArg $ToolInputArg"
+
+# 8. Wait Mode
 if ($Wait) {
     if ($WorkerProc) {
-        $Timeout = if ($Delay -gt 0) { ($Delay * 1000) + 10000 } else { 30000 }
+        $TimeoutMs = $Script:CONFIG_WORKER_TIMEOUT_MS
+        $TimeoutBuffer = $Script:CONFIG_WORKER_TIMEOUT_BUFFER_MS
+        if (-not $TimeoutMs) { $TimeoutMs = 30000 }
+        if (-not $TimeoutBuffer) { $TimeoutBuffer = 10000 }
+
+        $Timeout = if ($Delay -gt 0) { ($Delay * 1000) + $TimeoutBuffer } else { $TimeoutMs }
         $Exited = $WorkerProc.WaitForExit($Timeout)
-        if (-not $Exited) { Write-Warning "Worker process timed out." }
+        if (-not $Exited) {
+            Write-Warning "Worker process timed out. Terminating..."
+            try { $WorkerProc.Kill() } catch {}
+        }
     }
 }

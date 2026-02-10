@@ -1,3 +1,6 @@
+# Worker.ps1 - 后台通知工作进程
+# 负责解析内容、监控焦点、发送 Toast 通知
+
 param(
     [switch]$Worker,
     [string]$Base64Title,
@@ -5,7 +8,7 @@ param(
     [string]$ProjectName,
     [string]$NotificationType,
     [string]$ModulePath,
-    [string]$TranscriptPath, 
+    [string]$TranscriptPath,
     [switch]$EnableDebug,
     [int]$Delay = 0,
     [int]$TargetPid = 0,
@@ -32,11 +35,14 @@ try {
     if ($Base64Message) { $Message = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Base64Message)) }
     if ($ProjectName) { $ProjectName = [Uri]::UnescapeDataString($ProjectName) }
     if ($TranscriptPath) { $TranscriptPath = [Uri]::UnescapeDataString($TranscriptPath) }
-    
+    if ($AudioPath) { $AudioPath = [Uri]::UnescapeDataString($AudioPath) }
+
     $ToolInput = $null
     if ($Base64ToolInput) {
-        $JsonInput = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Base64ToolInput))
-        if ($JsonInput) { $ToolInput = $JsonInput | ConvertFrom-Json }
+        try {
+            $JsonInput = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($Base64ToolInput))
+            if ($JsonInput) { $ToolInput = $JsonInput | ConvertFrom-Json }
+        } catch { Write-DebugLog "ToolInput Decode Error: $_" }
     }
 } catch { Write-DebugLog "Decode Error: $_" }
 
@@ -52,47 +58,50 @@ function Test-IsFocused {
     return $false
 }
 
+$InitDelay = $Script:CONFIG_WATCHDOG_INIT_DELAY_MS
+if (-not $InitDelay) { $InitDelay = 300 }
+
 if ($TargetPid -gt 0 -and $ProjectName) {
     try {
         # Initial Sleep to let Shell start
-        Start-Sleep -Milliseconds 300
-        
+        Start-Sleep -Milliseconds $InitDelay
+
         # Persistent Attachment
         [WinApi]::FreeConsole() | Out-Null
         if ([WinApi]::AttachConsole($TargetPid)) {
             Write-DebugLog "Watchdog: Attached to Console (PID $TargetPid)"
-            
-            # Loop
-            $Max = $Delay
-            for ($i = 0; $i -le $Max; $i++) {
-                
-                # A. Force Title (Every Second)
-                try {
-                    # Native
-                    [System.Console]::Title = $ProjectName
-                    # OSC (Direct Flush)
-                    $Osc = "$([char]27)]0;$ProjectName$([char]7)"
-                    [System.Console]::Out.Write($Osc)
-                    [System.Console]::Out.Flush()
-                    
-                    if ($i -eq 0) { Write-DebugLog "Watchdog: Title Set '$ProjectName'" }
-                } catch {}
 
-                # B. Focus Check
-                if (Test-IsFocused) {
+            try {
+                # Loop
+                $Max = $Delay
+                for ($i = 0; $i -le $Max; $i++) {
+
+                    # A. Force Title (Every Second)
+                    try {
+                        [System.Console]::Title = $ProjectName
+                        $Osc = "$([char]27)]0;$ProjectName$([char]7)"
+                        [System.Console]::Out.Write($Osc)
+                        [System.Console]::Out.Flush()
+
+                        if ($i -eq 0) { Write-DebugLog "Watchdog: Title Set '$ProjectName'" }
+                    } catch {}
+
+                    # B. Focus Check
+                    if (Test-IsFocused) {
                         Write-DebugLog "Watchdog: User Focused at T=$i. Exiting."
                         exit 0
-                } else {
+                    } else {
                         if ($i % 2 -eq 0) { Write-DebugLog "Watchdog: Focus Mismatch (Checking...)" }
+                    }
+
+                    # Sleep (unless last iter)
+                    if ($i -lt $Max) { Start-Sleep -Seconds 1 }
                 }
-                
-                # Sleep (unless last iter)
-                if ($i -lt $Max) { Start-Sleep -Seconds 1 }
+            } finally {
+                # Cleanup - 确保 FreeConsole 始终执行
+                [WinApi]::FreeConsole() | Out-Null
             }
-            
-            # Cleanup
-            [WinApi]::FreeConsole() | Out-Null
-            
+
         } else {
             Write-DebugLog "Watchdog: Failed to attach. Running simple delay."
             Start-Sleep -Seconds $Delay
@@ -110,45 +119,46 @@ if (Test-IsFocused) {
 }
 
 # 4. Content Logic (Data Fusion)
-$PayloadMessage = $null
+$ToolInfo = $null
+$Description = $null
+
 if ($ToolName) {
     # A. Payload (Fast & Accurate Tool Info)
     $PayloadInfo = Get-ClaudeContentFromPayload -ToolName $ToolName -ToolInput $ToolInput -Message $Message
-    if ($PayloadInfo.Message) { 
-        $PayloadMessage = $PayloadInfo.Message 
-        $Message = $PayloadMessage # Set as primary
-    }
+    if ($PayloadInfo.ToolInfo) { $ToolInfo = $PayloadInfo.ToolInfo }
+    if ($PayloadInfo.Description) { $Description = $PayloadInfo.Description }
 }
 
 if ($TranscriptPath) {
-    # B. Transcript (User Question + Fallback Message)
+    # B. Transcript (User Question + Fallback)
     $Info = Get-ClaudeTranscriptInfo -TranscriptPath $TranscriptPath -ProjectName $ProjectName
-    
-    # Always take Title (Q: ...) if found, as Payload doesn't have it
+
+    # Always take Title (Q: ...) if found
     if ($Info.Title) { $Title = $Info.Title }
-    
-    # Only use Transcript Message if Payload failed to provide one
-    if (-not $PayloadMessage -and $Info.Message) { 
-        $Message = $Info.Message 
+
+    # Use Transcript ToolInfo/Description if Payload didn't provide
+    if (-not $ToolInfo -and $Info.ToolInfo) { $ToolInfo = $Info.ToolInfo }
+    if (-not $Description -and $Info.Description) { $Description = $Info.Description }
+
+    # Allow Transcript to refine NotificationType
+    if (-not $NotificationType -and $Info.NotificationType) {
+        $NotificationType = $Info.NotificationType
     }
-    
-    # Allow Transcript to refine NotificationType if missing
-    if (-not $NotificationType -and $Info.NotificationType) { 
-        $NotificationType = $Info.NotificationType 
-    }
-    
-    # Prepend Transcript time to Payload message (Hybrid Fusion)
-    if ($PayloadMessage -and $Info.ResponseTime) {
-        $Message = "[$($Info.ResponseTime)] $Message"
+
+    # Prepend Transcript time to ToolInfo (Hybrid Fusion)
+    if ($ToolInfo -and $Info.ResponseTime) {
+        $ToolInfo = "[$($Info.ResponseTime)] $ToolInfo"
     }
 }
 
 Write-DebugLog "Title: $Title"
-Write-DebugLog "Message: $Message"
+Write-DebugLog "ToolInfo: $ToolInfo"
+Write-DebugLog "Description: $Description"
 
 # 5. Send Toast
-Send-ClaudeToast -Title $Title -Message $Message -ProjectName $ProjectName `
-                 -AudioPath $AudioPath -NotificationType $NotificationType `
-                 -ModulePath $ModulePath -TargetPid $TargetPid
+Send-ClaudeToast -Title $Title -ToolInfo $ToolInfo -Description $Description `
+                 -ProjectName $ProjectName -AudioPath $AudioPath `
+                 -NotificationType $NotificationType -ModulePath $ModulePath `
+                 -TargetPid $TargetPid
 
 exit 0

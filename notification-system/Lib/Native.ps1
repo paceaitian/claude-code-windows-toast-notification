@@ -1,3 +1,6 @@
+# Native.ps1 - Windows API P/Invoke 封装
+# 提供进程管理、窗口操作等原生 API 调用
+
 try {
     if (-not ([System.Management.Automation.PSTypeName]'WinApi').Type) {
         Add-Type @"
@@ -7,13 +10,42 @@ try {
         using System.Diagnostics;
 
         public class WinApi {
-            [DllImport("kernel32.dll")] public static extern bool AttachConsole(uint dwProcessId);
-            [DllImport("kernel32.dll")] public static extern bool FreeConsole();
-            [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-            [DllImport("user32.dll")] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
-            [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+            // ================================================================
+            // Console API - 控制台附加/分离
+            // ================================================================
+            [DllImport("kernel32.dll")]
+            public static extern bool AttachConsole(uint dwProcessId);
 
-            // Parent Process Logic (Toolhelp32Snapshot)
+            [DllImport("kernel32.dll")]
+            public static extern bool FreeConsole();
+
+            // ================================================================
+            // Window API - 窗口操作
+            // ================================================================
+            [DllImport("user32.dll")]
+            public static extern IntPtr GetForegroundWindow();
+
+            [DllImport("user32.dll")]
+            public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+
+            [DllImport("user32.dll")]
+            public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+            [DllImport("user32.dll")]
+            public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+            [DllImport("user32.dll")]
+            public static extern bool IsIconic(IntPtr hWnd);
+
+            [DllImport("user32.dll")]
+            public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+            [DllImport("user32.dll")]
+            public static extern bool IsWindow(IntPtr hWnd);
+
+            // ================================================================
+            // Process API - 进程遍历 (Toolhelp32Snapshot)
+            // ================================================================
             [DllImport("kernel32.dll", SetLastError = true)]
             static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
 
@@ -42,25 +74,38 @@ try {
                 public string szExeFile;
             }
 
+            /// <summary>
+            /// 获取指定进程的父进程 ID
+            /// </summary>
+            /// <param name="pid">目标进程 ID</param>
+            /// <returns>父进程 ID，失败返回 0</returns>
             public static int GetParentPid(int pid) {
-                IntPtr hSnapshot = CreateToolhelp32Snapshot(0x00000002, 0); // TH32CS_SNAPPROCESS
-                if (hSnapshot == IntPtr.Zero) return 0;
+                IntPtr hSnapshot = IntPtr.Zero;
+                try {
+                    hSnapshot = CreateToolhelp32Snapshot(0x00000002, 0); // TH32CS_SNAPPROCESS
+                    if (hSnapshot == IntPtr.Zero) return 0;
 
-                PROCESSENTRY32 procEntry = new PROCESSENTRY32();
-                procEntry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+                    PROCESSENTRY32 procEntry = new PROCESSENTRY32();
+                    procEntry.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
 
-                if (Process32First(hSnapshot, ref procEntry)) {
-                    do {
-                        if (procEntry.th32ProcessID == pid) {
-                            CloseHandle(hSnapshot);
-                            return (int)procEntry.th32ParentProcessID;
-                        }
-                    } while (Process32Next(hSnapshot, ref procEntry));
+                    if (Process32First(hSnapshot, ref procEntry)) {
+                        do {
+                            if (procEntry.th32ProcessID == pid) {
+                                return (int)procEntry.th32ParentProcessID;
+                            }
+                        } while (Process32Next(hSnapshot, ref procEntry));
+                    }
+                    return 0;
+                } finally {
+                    if (hSnapshot != IntPtr.Zero) {
+                        CloseHandle(hSnapshot);
+                    }
                 }
-                CloseHandle(hSnapshot);
-                return 0;
             }
         }
 "@
     }
-} catch { Write-DebugLog "WinApi Setup Error: $_" }
+} catch {
+    # WinApi type already loaded or Add-Type failed - silent fail
+    # 注意：此处不能调用 Write-DebugLog，因为 Common.ps1 可能尚未加载
+}

@@ -1,7 +1,7 @@
-# Usage: .\register-protocol copy2.ps1
+# register-protocol.ps1 - 注册 claude-runner:// URI 协议
+# 运行一次即可，将协议处理器注册到 Windows 注册表
 
 $ProtocolName = "claude-runner"
-# Point to Main Runner
 $VbsPath = "$env:USERPROFILE\.claude\hooks\notification-system\runner.vbs"
 
 # Registry Keys
@@ -23,4 +23,4 @@ if (-not (Test-Path $CommandKey)) { New-Item -Path $CommandKey -Force | Out-Null
 $CommandVal = "`"wscript.exe`" `"$VbsPath`" `"%1`""
 Set-ItemProperty -Path $CommandKey -Name "(default)" -Value $CommandVal
 
-Write-Host "✅ Registered!" -ForegroundColor Green
+Write-Host "Registered!" -ForegroundColor Green
