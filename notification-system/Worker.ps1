@@ -15,7 +15,6 @@ param(
     [string]$AudioPath,
     [string]$ToolName,
     [string]$Base64ToolInput,
-    [switch]$SkipTitleInjection,
     [string]$ActualTitle
 )
 
@@ -55,8 +54,8 @@ try {
     }
 } catch { Write-DebugLog "Decode Error: $_" }
 
-# 2. Watchdog Logic (Persistent Override)
-# 用于焦点检测的标题（优先使用 ActualTitle，否则使用 ProjectName）
+# 2. Focus Watch (焦点检测，不修改标题)
+# Claude Code 已管理窗口标题，我们只需检测用户是否聚焦
 $TitleForFocusCheck = if ($ActualTitle) { $ActualTitle } else { $ProjectName }
 
 function Test-IsFocused {
@@ -70,63 +69,16 @@ function Test-IsFocused {
     return $false
 }
 
-$InitDelay = $Script:CONFIG_WATCHDOG_INIT_DELAY_MS
-if (-not $InitDelay) { $InitDelay = 300 }
+Write-DebugLog "FocusWatch: Delay=$Delay TitleMatch='$TitleForFocusCheck' PID=$TargetPid"
 
-if ($TargetPid -gt 0 -and $ProjectName) {
-    try {
-        # Initial Sleep to let Shell start
-        Start-Sleep -Milliseconds $InitDelay
-
-        # Persistent Attachment
-        [WinApi]::FreeConsole() | Out-Null
-        if ([WinApi]::AttachConsole($TargetPid)) {
-            Write-DebugLog "Watchdog: Attached to Console (PID $TargetPid)"
-
-            try {
-                # Loop
-                $Max = $Delay
-                for ($i = 0; $i -le $Max; $i++) {
-
-                    # A. Force Title (Every Second) - 仅当未跳过时执行
-                    if (-not $SkipTitleInjection) {
-                        try {
-                            $TitleToSet = if ($ActualTitle) { $ActualTitle } else { $ProjectName }
-                            [System.Console]::Title = $TitleToSet
-                            $Osc = "$([char]27)]0;$TitleToSet$([char]7)"
-                            [System.Console]::Out.Write($Osc)
-                            [System.Console]::Out.Flush()
-
-                            if ($i -eq 0) { Write-DebugLog "Watchdog: Title Set '$TitleToSet'" }
-                        } catch {}
-                    } else {
-                        if ($i -eq 0) { Write-DebugLog "Watchdog: Skipping title injection (user custom title)" }
-                    }
-
-                    # B. Focus Check
-                    if (Test-IsFocused) {
-                        Write-DebugLog "Watchdog: User Focused at T=$i. Exiting."
-                        exit 0
-                    } else {
-                        if ($i % 2 -eq 0) { Write-DebugLog "Watchdog: Focus Mismatch (Checking...)" }
-                    }
-
-                    # Sleep (unless last iter)
-                    if ($i -lt $Max) { Start-Sleep -Seconds 1 }
-                }
-            } finally {
-                # Cleanup - 确保 FreeConsole 始终执行
-                [WinApi]::FreeConsole() | Out-Null
-            }
-
-        } else {
-            Write-DebugLog "Watchdog: Failed to attach. Running simple delay."
-            Start-Sleep -Seconds $Delay
+if ($Delay -gt 0) {
+    for ($i = 0; $i -lt $Delay; $i++) {
+        Start-Sleep -Seconds 1
+        if (Test-IsFocused) {
+            Write-DebugLog "FocusWatch: User Focused at T=$($i+1). Exiting."
+            exit 0
         }
-    } catch { Write-DebugLog "Watchdog Error: $_" }
-} else {
-    # Fallback (No PID)
-    Start-Sleep -Seconds $Delay
+    }
 }
 
 # 3. Final Safety Focus Check (Post-Loop)

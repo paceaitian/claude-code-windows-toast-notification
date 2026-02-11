@@ -1,5 +1,9 @@
 # Notification System 架构文档
 
+## 设计理念
+
+Claude Code 会自动管理窗口标题（设置为对话摘要，如 `⠐ 多智能体审查`），且在用户下一次输入前不会修改。本系统利用这一特性：**读取标题而非覆盖标题**，仅在标题为默认值时 fallback 设置项目名。
+
 ## 系统架构概览
 
 ```
@@ -23,7 +27,7 @@
 │                        支撑模块 (Lib/)                               │
 ├─────────────────────────────────────────────────────────────────────┤
 │  Config.ps1    - 配置常量                                            │
-│  Common.ps1    - 调试日志 + 标题检测函数                             │
+│  Common.ps1    - 调试日志 + 标题检测                                 │
 │  Native.ps1    - Windows API P/Invoke                                │
 │  Transcript.ps1 - 转录文件解析                                       │
 │  Toast.ps1     - BurntToast 通知发送                                 │
@@ -51,16 +55,16 @@
    - 找到 Claude 之后的第一个 Shell (`cmd|pwsh|powershell|bash`)
    - 使用 `WinApi::GetParentPid()` P/Invoke 快速遍历
 
-4. **注入窗口标题** (L109-145)
-   - `AttachConsole()` 附加到目标 Shell
-   - **检测当前标题是否为默认值** (`Test-IsDefaultTitle`)
-   - 如果是默认值 → 检测冲突 → 设置项目名（可能带 PID 后缀）
-   - 如果是用户自定义 → 保持不变，设置 `$SkipTitleInjection` 标记
-   - 目的: 让 Worker 能通过窗口标题检测用户焦点
+4. **读取窗口标题** (L109-141)
+   - `AttachConsole()` 附加到目标 Shell，读取当前窗口标题
+   - 调用 `Test-IsDefaultTitle()` 检测标题类型:
+     - **默认值** (Claude Code / PowerShell / cmd 等) → 设置为项目名作为 fallback
+     - **非默认值** (Claude Code 已设置的对话摘要) → 直接使用，不修改
+   - 将 `$ActualTitle` 传给 Worker 用于焦点检测和 Toast URI
 
-5. **启动 Worker** (L199-213)
+5. **启动 Worker** (L207-210)
    - 编码参数 (Base64 + URI Escape)
-   - 传递 `-SkipTitleInjection` 和 `-ActualTitle` 参数
+   - 传递 `-ActualTitle` 参数
    - `Start-Process pwsh -WindowStyle Hidden` 启动后台进程
    - 可选 `-Wait` 模式等待 Worker 完成
 
@@ -88,8 +92,8 @@ HKCU:\Software\Classes\claude-runner\shell\open\command
 - 验证 HandlerPath 在预期目录内
 - 验证文件存在
 
-**启动 PowerShell** (L39-41):
-- `pwsh -WindowStyle Hidden -File ProtocolHandler.ps1 "uri_args"`
+**启动 PowerShell** (L39-40):
+- `pwsh -WindowStyle Hidden -File ProtocolHandler.ps1 "uri_args" -EnableDebug`
 
 ### ProtocolHandler.ps1 (协议处理器)
 
@@ -128,26 +132,17 @@ HKCU:\Software\Classes\claude-runner\shell\open\command
    - Base64 解码 Title/Message/ToolInput
    - URI 解码 ProjectName/TranscriptPath/AudioPath/ActualTitle
 
-2. **Watchdog 焦点监控** (L58-125)
+2. **焦点检测** (L58-83)
+   - 使用 `$ActualTitle` 匹配前台窗口标题
+   - 在 Delay 期间每秒检测一次
+   - **如果用户聚焦 → 立即退出，不发送通知**
+   - 不修改窗口标题（Claude Code 自行管理）
 
-   **有 TargetPid 时**:
-   - 初始等待 300ms
-   - `AttachConsole()` 附加到目标 Shell
-   - 循环 (0 到 Delay 秒):
-     - **如果 `$SkipTitleInjection` 为 false**: 每秒强制设置窗口标题
-     - **如果 `$SkipTitleInjection` 为 true**: 跳过标题设置（尊重用户自定义）
-     - 检查用户是否聚焦到目标窗口（使用 `$ActualTitle` 匹配）
-     - **如果用户聚焦 → 立即退出，不发送通知**
-   - 循环结束后 `FreeConsole()` 清理
-
-   **无 TargetPid 时**:
-   - 简单 `Start-Sleep -Seconds $Delay`
-
-3. **最终焦点检查** (L127-131)
+3. **最终焦点检查** (L85-89)
    - 再次检查用户是否聚焦
    - 聚焦则退出，不发送通知
 
-4. **内容提取** (L127-158)
+4. **内容提取** (L91-169)
 
    **Payload 优先** (来自 Hook 直接传入):
    - `Get-ClaudeContentFromPayload()` 格式化工具信息
@@ -160,7 +155,7 @@ HKCU:\Software\Classes\claude-runner\shell\open\command
      - 响应时间 → 前缀到 ToolInfo
      - 通知类型 → NotificationType
 
-5. **发送 Toast** (L170-178)
+5. **发送 Toast** (L175-182)
    - 使用 `$ActualTitle`（实际窗口标题）构建 URI
    - 调用 `Send-ClaudeToast()`
 
@@ -206,7 +201,6 @@ HKCU:\Software\Classes\claude-runner\shell\open\command
 | 路径 | DEBUG_LOG_PATH | `~/.claude/toast_debug.log` |
 | 路径 | LOGO_PATH | `~/.claude/assets/claude-logo.png` |
 | 路径 | PERMISSION_AUDIO_PATH | `~/OneDrive/Aurora.wav` |
-| 时间 | WATCHDOG_INIT_DELAY_MS | 300 |
 | 时间 | SENDKEYS_DELAY_MS | 250 |
 | 时间 | WORKER_TIMEOUT_MS | 30000 |
 | 长度 | TOOL_DETAIL_MAX_LENGTH | 400 |
@@ -217,18 +211,16 @@ HKCU:\Software\Classes\claude-runner\shell\open\command
 ### Common.ps1 - 调试日志 + 标题检测
 
 **调试日志** (`Write-DebugLog`):
-- 仅当 `$EnableDebug` 或 `$env:CLAUDE_HOOK_DEBUG=1` 时写入
+- 遍历 Scope 0-5 查找 `$EnableDebug` 参数
+- 也支持 `$env:CLAUDE_HOOK_DEBUG=1` 环境变量
 
 **默认标题检测** (`Test-IsDefaultTitle`):
-- 检测 Claude Code 动态标题: `* Claude Code`, `· Claude Code`, `✻ Claude Code`
-- 检测 Claude Code 目录格式: `claude - <目录>`
-- 检测 Shell 默认标题: `PowerShell`, `cmd`, `pwsh` 等
-- 返回 `$true` 表示默认值，`$false` 表示用户自定义
-
-**唯一标题生成** (`Get-UniqueProjectTitle`):
-- 检测是否有其他窗口使用相同标题
-- 如有冲突，添加 PID 后 4 位作为后缀
-- 示例: `hooks` → `hooks [1234]`
+- Claude Code 动态标题: `* Claude Code`, `· Claude Code`, `✻ Claude Code`
+- Claude Code Braille 动画前缀: `⠐`, `⠑`, `⠒` 等 (Unicode \u2800-\u28FF)
+- Claude Code 目录格式: `claude - <目录>`
+- Shell 默认标题: `PowerShell`, `cmd`, `pwsh` 等
+- Shell 可执行文件路径: `\\cmd.exe`, `\\powershell.exe`, `\\pwsh.exe`
+- 返回 `$true` = 默认值（需要 fallback），`$false` = Claude Code 已设置有意义的标题
 
 ### Native.ps1 - Windows API
 
@@ -263,32 +255,39 @@ HKCU:\Software\Classes\claude-runner\shell\open\command
 
 ## 所有运行情况汇总
 
-### 情况 1: 正常通知 (用户不在焦点)
+### 情况 1: Claude Code 已设置对话标题 (主要场景)
 
 ```
 Hook 触发 → Launcher.ps1
   → 找到 Shell PID
-  → 注入窗口标题
-  → 启动 Worker.ps1
-    → Watchdog 循环检测焦点
-    → 用户始终未聚焦
-    → 提取内容 (Payload + Transcript)
-    → Send-ClaudeToast()
-      → 显示 Toast 通知
-      → 用户点击通知
-        → runner.vbs → ProtocolHandler.ps1
-          → 激活窗口
+  → 读取当前标题 "⠐ 多智能体审查" (Claude Code 已设置)
+  → Test-IsDefaultTitle() 返回 false → 直接使用
+  → 启动 Worker.ps1 -ActualTitle "⠐ 多智能体审查"
+    → 焦点检测使用 "⠐ 多智能体审查" 匹配
+    → 用户未聚焦 → 发送 Toast 通知
+    → 用户点击 Toast → ProtocolHandler 用该标题找到窗口
 ```
 
-### 情况 2: 用户已聚焦 (不发送通知)
+### 情况 2: 标题为默认值 (Fallback 场景)
+
+```
+Hook 触发 → Launcher.ps1
+  → 读取当前标题 "PowerShell" (默认值)
+  → Test-IsDefaultTitle() 返回 true
+  → Fallback: 设置标题为项目名 "hooks"
+  → 启动 Worker.ps1 -ActualTitle "hooks"
+    → 焦点检测使用 "hooks" 匹配
+```
+
+### 情况 3: 用户已聚焦 (不发送通知)
 
 ```
 Hook 触发 → Launcher.ps1 → Worker.ps1
-  → Watchdog 检测到用户聚焦
+  → 焦点检测命中
   → exit 0 (不发送通知)
 ```
 
-### 情况 3: 权限提示 (带 Proceed 按钮)
+### 情况 4: 权限提示 (带 Proceed 按钮)
 
 ```
 Hook 触发 (notification_type=permission_prompt)
@@ -302,7 +301,7 @@ Hook 触发 (notification_type=permission_prompt)
         → SendKeys("1") 自动批准
 ```
 
-### 情况 4: 无 BurntToast 模块 (Fallback)
+### 情况 5: 无 BurntToast 模块 (Fallback)
 
 ```
 Worker.ps1 → Send-ClaudeToast()
@@ -311,17 +310,17 @@ Worker.ps1 → Send-ClaudeToast()
   → 显示系统托盘气球通知
 ```
 
-### 情况 5: 无 Shell PID (降级模式)
+### 情况 6: 无 Shell PID (降级模式)
 
 ```
 Launcher.ps1
   → 未找到交互式 Shell
-  → 无法注入标题
-  → Worker.ps1 使用简单 Sleep
-  → 发送通知 (无焦点检测)
+  → 无法读取标题
+  → Worker.ps1 使用项目名作为 fallback
+  → 发送通知
 ```
 
-### 情况 6: URI 协议直接触发
+### 情况 7: URI 协议直接触发
 
 ```
 用户点击 claude-runner://... 链接
@@ -332,7 +331,7 @@ Launcher.ps1
     → 处理 action=approve (如有)
 ```
 
-### 情况 7: 安全拦截 (无 WindowTitle)
+### 情况 8: 安全拦截 (无 WindowTitle)
 
 ```
 ProtocolHandler.ps1 收到 action=approve
@@ -341,7 +340,7 @@ ProtocolHandler.ps1 收到 action=approve
   → 记录日志 "No WindowTitle provided. Aborting SendKeys for security."
 ```
 
-### 情况 8: 窗口竞态条件检测
+### 情况 9: 窗口竞态条件检测
 
 ```
 ProtocolHandler.ps1 收到 action=approve
@@ -352,46 +351,20 @@ ProtocolHandler.ps1 收到 action=approve
   → 记录日志 "Window changed during verification"
 ```
 
-### 情况 9: 用户自定义 Tab 名称 (尊重用户设置)
-
-```
-Hook 触发 → Launcher.ps1
-  → 读取当前窗口标题 "hooks-ui"
-  → Test-IsDefaultTitle() 返回 false
-  → 保持标题不变，设置 $SkipTitleInjection = $true
-  → 启动 Worker.ps1 -SkipTitleInjection -ActualTitle "hooks-ui"
-    → Watchdog 跳过标题设置
-    → 使用 "hooks-ui" 进行焦点检测
-    → Toast URI 使用 "hooks-ui" 作为 windowtitle
-```
-
-### 情况 10: Tab 名称冲突 (自动添加 PID 后缀)
-
-```
-Hook 触发 → Launcher.ps1
-  → 读取当前窗口标题 "Claude Code" (默认值)
-  → Test-IsDefaultTitle() 返回 true
-  → Get-UniqueProjectTitle() 检测到另一个窗口也叫 "hooks"
-  → 设置标题为 "hooks [1234]" (PID 后 4 位)
-  → 启动 Worker.ps1 -ActualTitle "hooks [1234]"
-    → Watchdog 使用 "hooks [1234]" 设置标题
-    → Toast URI 使用 "hooks [1234]" 作为 windowtitle
-```
-
 ---
 
 ## 文件结构
 
 ```
 notification-system/
-├── Launcher.ps1          # 入口：Hook 触发，启动 Worker
-├── Worker.ps1            # 后台进程：焦点监控 + 内容提取 + 发送通知
+├── Launcher.ps1          # 入口：Hook 触发，读取标题，启动 Worker
+├── Worker.ps1            # 后台进程：焦点检测 + 内容提取 + 发送通知
 ├── ProtocolHandler.ps1   # URI 协议处理：窗口激活 + 按钮动作
 ├── runner.vbs            # VBS 包装器：安全过滤 + 启动 PowerShell
 ├── register-protocol.ps1 # 一次性：注册 URI 协议
 ├── Lib/
 │   ├── Config.ps1        # 配置常量
-│   ├── Common.ps1        # 调试日志
+│   ├── Common.ps1        # 调试日志 + 标题检测
 │   ├── Native.ps1        # Windows API P/Invoke
 │   ├── Transcript.ps1    # 转录文件解析
 │   └── Toast.ps1         # BurntToast 通知发送

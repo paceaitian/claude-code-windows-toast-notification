@@ -2,16 +2,23 @@
 # 提供调试日志和编码修复等基础功能
 
 # 加载配置
-$Dir = Split-Path $MyInvocation.MyCommand.Path
-. "$Dir\Config.ps1"
+$CommonDir = Split-Path $MyInvocation.MyCommand.Path
+. "$CommonDir\Config.ps1"
 
 # 调试日志路径（从配置读取）
 $DebugLog = $Script:CONFIG_DEBUG_LOG_PATH
 
-# 调试模式检测：检查调用脚本的 $EnableDebug 参数或环境变量
-# 注意：$EnableDebug 来自调用脚本（Launcher/Worker）的参数作用域
+# 调试模式检测：检查当前作用域链中的 $EnableDebug 参数或环境变量
+# dot-source 时 $EnableDebug 在 Scope 0（与调用脚本共享作用域）
 if (-not $Script:DebugEnabled) {
-    $Script:DebugEnabled = (Get-Variable -Name EnableDebug -Scope 1 -ValueOnly -ErrorAction SilentlyContinue) -or ($env:CLAUDE_HOOK_DEBUG -eq "1")
+    $found = $false
+    for ($scope = 0; $scope -le 5; $scope++) {
+        try {
+            $val = Get-Variable -Name EnableDebug -Scope $scope -ValueOnly -ErrorAction Stop
+            if ($val) { $found = $true; break }
+        } catch { }
+    }
+    $Script:DebugEnabled = $found -or ($env:CLAUDE_HOOK_DEBUG -eq "1")
 }
 
 <#
@@ -50,9 +57,11 @@ function Test-IsDefaultTitle([string]$Title) {
     if ([string]::IsNullOrWhiteSpace($Title)) { return $true }
 
     # Claude Code 动态标题模式（包含状态前缀）
+    # Claude Code 使用 Braille 字符(⠐⠑⠒等)、*、·、✻、. 作为动画前缀
     $ClaudePatterns = @(
-        '^[*·✻.\s]*Claude Code$',      # * Claude Code, · Claude Code, etc.
-        '^claude\s+-\s*.+$'             # claude - hooks (必须有空格在 claude 后)
+        '^[*·✻.\s\u2800-\u28FF]*Claude Code$',  # * Claude Code, · Claude Code, ⠐ Claude Code
+        '^claude\s+-\s*.+$',                      # claude - hooks (必须有空格在 claude 后)
+        '^[\u2800-\u28FF]'                         # 以 Braille 字符开头 = Claude Code 动画前缀
     )
 
     # Shell 默认标题
@@ -62,7 +71,10 @@ function Test-IsDefaultTitle([string]$Title) {
         '^pwsh$',
         '^cmd$',
         '^Command Prompt$',
-        '^Administrator:\s*(PowerShell|Windows PowerShell|pwsh|cmd|Command Prompt)$'
+        '^Administrator:\s*(PowerShell|Windows PowerShell|pwsh|cmd|Command Prompt)$',
+        '\\cmd\.exe',                  # C:\WINDOWS\system32\cmd.exe
+        '\\powershell\.exe',           # C:\...\powershell.exe
+        '\\pwsh\.exe'                  # C:\...\pwsh.exe
     )
 
     $AllPatterns = $ClaudePatterns + $ShellPatterns
@@ -71,46 +83,4 @@ function Test-IsDefaultTitle([string]$Title) {
         if ($Title -match $pattern) { return $true }
     }
     return $false
-}
-
-<#
-.SYNOPSIS
-    获取唯一的项目标题（处理冲突）
-
-.PARAMETER ProjectName
-    项目名称
-
-.PARAMETER TargetPid
-    目标进程 ID
-
-.OUTPUTS
-    唯一的项目标题，如有冲突则添加 PID 后 4 位
-
-.NOTES
-    检测是否有其他窗口使用相同标题，如有冲突则添加 PID 后缀
-#>
-function Get-UniqueProjectTitle([string]$ProjectName, [int]$TargetPid) {
-    if (-not $ProjectName -or $TargetPid -le 0) { return $ProjectName }
-
-    try {
-        # 检查是否有其他窗口使用相同标题
-        $Existing = Get-Process | Where-Object {
-            $_.MainWindowTitle -eq $ProjectName -and
-            $_.Id -ne $TargetPid -and
-            $_.ProcessName -ne "explorer"
-        }
-
-        if ($Existing) {
-            # 添加 PID 后 4 位作为标识
-            $PidStr = $TargetPid.ToString()
-            $Suffix = $PidStr.Substring([Math]::Max(0, $PidStr.Length - 4))
-            $UniqueTitle = "$ProjectName [$Suffix]"
-            Write-DebugLog "Title conflict detected. Using unique title: $UniqueTitle"
-            return $UniqueTitle
-        }
-    } catch {
-        Write-DebugLog "Get-UniqueProjectTitle Error: $_"
-    }
-
-    return $ProjectName
 }
