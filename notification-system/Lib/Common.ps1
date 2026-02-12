@@ -14,8 +14,12 @@ if (-not $Script:DebugEnabled) {
     $found = $false
     for ($scope = 0; $scope -le 5; $scope++) {
         try {
-            $val = Get-Variable -Name EnableDebug -Scope $scope -ValueOnly -ErrorAction Stop
-            if ($val) { $found = $true; break }
+            $val = Get-Variable -Name EnableDebug -Scope $scope -ErrorAction Stop
+            # 明确检查是否为 $true，避免将 $false 误判为未设置
+            if ($null -ne $val -and $val.Value -eq $true) {
+                $found = $true
+                break
+            }
         } catch { }
     }
     $Script:DebugEnabled = $found -or ($env:CLAUDE_HOOK_DEBUG -eq "1")

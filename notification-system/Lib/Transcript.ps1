@@ -87,7 +87,15 @@ function Format-ClaudeToolInfo {
     else {
         switch -Regex ($Name) {
             "^Bash$" {
-                if ($InputObj.command) { $Detail = $InputObj.command }
+                # 优先使用 description（更易读），fallback 到 command（详细命令）
+                if ($InputObj.description) { $Detail = $InputObj.description }
+                elseif ($InputObj.command) { $Detail = $InputObj.command }
+            }
+            "^Skill$" {
+                # Skill 工具：显示 skill 名称 + description
+                if ($InputObj.skill) { $DisplayName = ConvertTo-TitleCase $InputObj.skill }
+                if ($InputObj.description) { $Detail = $InputObj.description }
+                elseif ($InputObj.args) { $Detail = $InputObj.args }
             }
             "^Grep$" {
                 if ($InputObj.pattern) { $Detail = "Search: " + $InputObj.pattern }
@@ -95,7 +103,17 @@ function Format-ClaudeToolInfo {
             "^(Read|Write|Edit)(_file)?$" {
                 $DisplayName = $Matches[1]
                 if ($InputObj.file_path) {
-                    $Detail = Split-Path $InputObj.file_path -Leaf
+                    # 显示最后两级目录 + 文件名（更有上下文）
+                    try {
+                        $parts = $InputObj.file_path -split '[\\/]'
+                        if ($parts.Count -gt 2) {
+                            $Detail = ($parts[-3..-1] -join '\') # 显示最后3段
+                        } else {
+                            $Detail = Split-Path $InputObj.file_path -Leaf
+                        }
+                    } catch {
+                        $Detail = Split-Path $InputObj.file_path -Leaf
+                    }
                 }
             }
             "WebSearch|google_search" {
@@ -124,8 +142,8 @@ function Format-ClaudeToolInfo {
         }
 
         if ($Detail.Length -gt $MaxLen) { $Detail = $Detail.Substring(0, $MaxLen - 3) + "..." }
-        # XML Escape
-        $Detail = $Detail -replace ">", "&gt;" -replace "<", "&lt;"
+        # XML 转义（注意：必须先转义 & 避免二次转义）
+        $Detail = $Detail -replace "&", "&amp;" -replace "<", "&lt;" -replace ">", "&gt;"
         return "[$DisplayName] $Detail"
     }
     return "[$DisplayName]"

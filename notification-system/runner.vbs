@@ -1,6 +1,26 @@
 ' runner.vbs - VBScript 启动包装器
 ' 用于从 URI 协议启动 PowerShell 处理器，避免命令行窗口闪烁
 
+' 错误日志函数
+Sub LogError(msg)
+    On Error Resume Next
+    Dim fso, logFile, logPath
+    Set fso = CreateObject("Scripting.FileSystemObject")
+    logPath = CreateObject("WScript.Shell").ExpandEnvironmentStrings("%USERPROFILE%\.claude\hooks\notification-system\runner-error.log")
+
+    ' 确保目录存在
+    Dim logDir
+    logDir = fso.GetParentFolderName(logPath)
+    If Not fso.FolderExists(logDir) Then
+        fso.CreateFolder(logDir)
+    End If
+
+    ' 追加日志
+    Set logFile = fso.OpenTextFile(logPath, 8, True) ' 8 = ForAppending
+    logFile.WriteLine Now & " - " & msg
+    logFile.Close
+End Sub
+
 Set args = WScript.Arguments
 If args.Count > 0 Then
     ProtoArg = args(0)
@@ -27,11 +47,13 @@ If args.Count > 0 Then
     ' 安全检查：验证路径在预期目录内，防止路径遍历
     ExpectedBase = CreateObject("WScript.Shell").ExpandEnvironmentStrings("%USERPROFILE%\.claude\hooks\notification-system")
     If InStr(1, HandlerPath, ExpectedBase, vbTextCompare) <> 1 Then
+        LogError "路径验证失败: " & HandlerPath & " (期望基路径: " & ExpectedBase & ")"
         WScript.Quit 1
     End If
 
     ' 验证文件存在
     If Not fso.FileExists(HandlerPath) Then
+        LogError "文件不存在: " & HandlerPath
         WScript.Quit 1
     End If
 
