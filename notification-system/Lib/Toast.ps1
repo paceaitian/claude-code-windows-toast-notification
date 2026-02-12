@@ -38,7 +38,8 @@ function Send-ClaudeToast {
         [string]$AudioPath,
         [string]$NotificationType,
         [string]$ModulePath,
-        [int]$TargetPid
+        [int]$TargetPid,
+        [string]$UniqueId
     )
 
     # 1. Load BurntToast
@@ -100,9 +101,21 @@ function Send-ClaudeToast {
 
     if ($AudioPath -and (Test-Path $AudioPath)) {
         $FinalSoundPath = $AudioPath
-    } elseif ($NotificationType -eq 'permission_prompt') {
-        if (Test-Path $PermissionAudioPath) { $FinalSoundPath = $PermissionAudioPath }
+        Write-DebugLog "Audio: Using custom path '$AudioPath'"
+    } elseif ($AudioPath) {
+        Write-DebugLog "Audio: Custom path NOT FOUND '$AudioPath'"
     }
+
+    if (-not $FinalSoundPath -and $NotificationType -eq 'permission_prompt') {
+        if (Test-Path $PermissionAudioPath) {
+            $FinalSoundPath = $PermissionAudioPath
+            Write-DebugLog "Audio: Using permission audio '$PermissionAudioPath'"
+        } else {
+            Write-DebugLog "Audio: Permission audio NOT FOUND '$PermissionAudioPath'"
+        }
+    }
+
+    if (-not $FinalSoundPath) { Write-DebugLog "Audio: No sound will play" }
 
     try {
         # 4. Build Text Elements (三层显示：标题 + 工具信息 + 描述)
@@ -156,17 +169,20 @@ function Send-ClaudeToast {
         $Content = New-BTContent -Visual $Visual -Actions $Actions -Audio $Audio `
             -ActivationType Protocol -Launch $LaunchUri -Scenario Reminder
 
-        Submit-BTNotification -Content $Content
+        Submit-BTNotification -Content $Content -UniqueIdentifier $(if ($UniqueId) { $UniqueId } else { "claude-default" })
 
-        # 8. Play Custom Sound (异步播放，不阻塞通知显示)
+        # 8. Play Custom Sound (同步播放，Toast 已在上方 Submit 完成显示)
         if ($FinalSoundPath) {
             try {
                 $Player = New-Object System.Media.SoundPlayer $FinalSoundPath
-                # 使用异步播放，让音频在后台播放
-                # 注意：不使用 PlaySync() 是因为不想阻塞通知流程
-                # Dispose 会在 GC 时自动调用，这里不立即 Dispose 以确保音频播放完成
-                $Player.Play()
-            } catch { Write-DebugLog "Sound Play Error: $_" }
+                Write-DebugLog "Audio: Playing '$FinalSoundPath' (sync)"
+                $Player.PlaySync()
+                Write-DebugLog "Audio: Playback complete"
+            } catch {
+                Write-DebugLog "Audio: Play Error: $_"
+            } finally {
+                if ($Player) { $Player.Dispose() }
+            }
         }
     } catch { Write-DebugLog "Toast Error: $_" }
 }

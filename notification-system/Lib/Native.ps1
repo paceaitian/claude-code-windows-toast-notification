@@ -19,6 +19,9 @@ try {
             [DllImport("kernel32.dll")]
             public static extern bool FreeConsole();
 
+            [DllImport("kernel32.dll")]
+            public static extern IntPtr GetConsoleWindow();
+
             // ================================================================
             // Window API - 窗口操作
             // ================================================================

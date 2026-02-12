@@ -124,6 +124,25 @@ Write-DebugLog "Title: $Title"
 Write-DebugLog "ToolInfo: $ToolInfo"
 Write-DebugLog "Description: $Description"
 
+# 4.5 Description Guard: AI 尚未回复时跳过残缺 Toast
+if (-not $Description -and -not $ToolInfo) {
+    Write-DebugLog "ContentGuard: No Description or ToolInfo. Skipping empty toast."
+    exit 0
+}
+
+# 4.6 UniqueId 计算（同一对话 turn 的多次 Stop 触发只保留最后一个 Toast）
+$UniqueId = $null
+try {
+    $HashSource = if ($TranscriptPath) { "$TranscriptPath||$Title" } else { "$ProjectName||$Title" }
+    $Sha = [System.Security.Cryptography.SHA256]::Create()
+    $HashBytes = $Sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($HashSource))
+    $HashHex = ($HashBytes | ForEach-Object { $_.ToString("x2") }) -join ""
+    $UniqueId = "claude-$($HashHex.Substring(0, 16))"
+    Write-DebugLog "UniqueId: $UniqueId"
+} catch {
+    Write-DebugLog "UniqueId compute failed: $_"
+}
+
 # 5. Send Toast
 # 使用 ActualTitle（实际窗口标题）用于 Toast URI，确保点击能正确激活窗口
 $WindowTitleForToast = if ($ActualTitle) { $ActualTitle } else { $ProjectName }
@@ -131,6 +150,6 @@ $WindowTitleForToast = if ($ActualTitle) { $ActualTitle } else { $ProjectName }
 Send-ClaudeToast -Title $Title -ToolInfo $ToolInfo -Description $Description `
                  -ProjectName $WindowTitleForToast -AudioPath $AudioPath `
                  -NotificationType $NotificationType -ModulePath $ModulePath `
-                 -TargetPid $TargetPid
+                 -TargetPid $TargetPid -UniqueId $UniqueId
 
 exit 0

@@ -80,6 +80,7 @@ function Format-ClaudeToolInfo {
 
         if ($InputObj.command) { $Detail = $InputObj.command }
         elseif ($InputObj.query) { $Detail = "Search: " + $InputObj.query }
+        elseif ($InputObj.q) { $Detail = "Search: " + $InputObj.q }
         elseif ($InputObj.path) { $Detail = $InputObj.path }
         elseif ($InputObj.uri) { $Detail = $InputObj.uri }
     }
@@ -283,12 +284,8 @@ function Get-ClaudeTranscriptInfo {
                         $TextString = $CleanText
                     }
 
-                    # --- DETECT PERMISSION ---
-                    $IsPermission = ($TextString -match "(permission|approve|proceed|allow|confirm|authorize)")
-
-                    if ($Result.NotificationType -eq 'permission_prompt' -or $IsPermission) {
-                        if (-not $Result.NotificationType) { $Result.NotificationType = 'permission_prompt' }
-                    }
+                    # notification_type 只信任 Launcher 从 payload 中提取的值
+                    # 不从回复文本中猜测（"permission"/"proceed" 等词在普通消息中会误判）
 
                     $Result.Description = $TextString
 

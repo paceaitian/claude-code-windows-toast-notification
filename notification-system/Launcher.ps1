@@ -113,8 +113,13 @@ if ($TargetPid -gt 0) {
     [WinApi]::FreeConsole() | Out-Null
     if ([WinApi]::AttachConsole($TargetPid)) {
         try {
-            # 读取当前窗口标题（Claude Code 已设置为对话摘要）
-            $Hwnd = [WinApi]::GetForegroundWindow()
+            # 读取 Console 窗口标题（AttachConsole 后 GetConsoleWindow 返回目标 Shell 的 Console HWND）
+            $Hwnd = [WinApi]::GetConsoleWindow()
+            if ($Hwnd -eq [IntPtr]::Zero) {
+                # Fallback: GetConsoleWindow 失败时（极罕见）
+                Write-DebugLog "Launcher: GetConsoleWindow returned NULL, fallback to GetForegroundWindow"
+                $Hwnd = [WinApi]::GetForegroundWindow()
+            }
             $Sb = [System.Text.StringBuilder]::new(256)
             [WinApi]::GetWindowText($Hwnd, $Sb, 256) | Out-Null
             $CurrentTitle = $Sb.ToString()
