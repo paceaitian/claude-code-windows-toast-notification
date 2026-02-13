@@ -267,9 +267,60 @@ Test-Assert "正常字符串" ((ConvertTo-TitleCase "hello") -eq "Hello")
 Test-Assert "null → 空字符串" ((ConvertTo-TitleCase $null) -eq "")
 
 # ============================================================================
-# 测试 12: SoundPlayer 同步播放（可选，需要音频文件）
+# 测试 12: Slash Command 标题提取
 # ============================================================================
-Write-Section "12. 音频同步播放"
+Write-Section "12. Slash Command 标题提取"
+
+# 构造模拟 transcript 文件
+$SlashTestDir = Join-Path $env:TEMP "claude-slash-test-$(Get-Random)"
+New-Item -ItemType Directory -Path $SlashTestDir -Force | Out-Null
+$SlashTestFile = Join-Path $SlashTestDir "test.jsonl"
+
+# Case 1: slash command 后没有普通用户消息 → 应提取命令名
+$SlashLines = @(
+    '{"type":"user","message":{"content":"push吧，不需要追踪"}}'
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"git push"}}]}}'
+    '{"type":"user","message":{"content":"<command-message>claude-hud:configure</command-message>\n<command-name>/claude-hud:configure</command-name>"}}'
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"config.json"}},{"type":"text","text":"配置已存在"}]},"timestamp":"2026-02-14T02:05:28+08:00"}'
+)
+$SlashLines | Set-Content $SlashTestFile -Encoding UTF8
+
+$SlashResult = Get-ClaudeTranscriptInfo -TranscriptPath $SlashTestFile -ProjectName "test"
+Test-Assert "Slash command 标题提取" ($SlashResult.Title -eq "Q: /claude-hud:configure")
+Write-Host "         Got: $($SlashResult.Title)" -ForegroundColor DarkGray
+
+# Case 2: slash command 后有普通用户消息 → 应提取普通消息
+$SlashLines2 = @(
+    '{"type":"user","message":{"content":"<command-name>/compact</command-name>\n<command-message>compact</command-message>"}}'
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"已压缩"}]}}'
+    '{"type":"user","message":{"content":"发现一个问题"}}'
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"tail log"}},{"type":"text","text":"日志内容"}]},"timestamp":"2026-02-14T02:10:00+08:00"}'
+)
+$SlashLines2 | Set-Content $SlashTestFile -Encoding UTF8
+
+$SlashResult2 = Get-ClaudeTranscriptInfo -TranscriptPath $SlashTestFile -ProjectName "test"
+Test-Assert "普通消息优先于 slash command" ($SlashResult2.Title -eq "Q: 发现一个问题")
+Write-Host "         Got: $($SlashResult2.Title)" -ForegroundColor DarkGray
+
+# Case 3: local-command-caveat 不应被提取
+$SlashLines3 = @(
+    '{"type":"user","message":{"content":"hello world"}}'
+    '{"type":"user","isMeta":true,"message":{"content":"<local-command-caveat>Caveat</local-command-caveat>"}}'
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"结果"}]},"timestamp":"2026-02-14T02:15:00+08:00"}'
+)
+$SlashLines3 | Set-Content $SlashTestFile -Encoding UTF8
+
+$SlashResult3 = Get-ClaudeTranscriptInfo -TranscriptPath $SlashTestFile -ProjectName "test"
+Test-Assert "isMeta 系统消息被跳过" ($SlashResult3.Title -eq "Q: hello world")
+Write-Host "         Got: $($SlashResult3.Title)" -ForegroundColor DarkGray
+
+# 清理
+Remove-Item $SlashTestDir -Recurse -Force -ErrorAction SilentlyContinue
+
+# ============================================================================
+# 测试 13: SoundPlayer 同步播放（可选，需要音频文件）
+# ============================================================================
+Write-Section "13. 音频同步播放"
 
 if (Test-Path $AuroraPath) {
     $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()

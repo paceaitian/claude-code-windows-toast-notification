@@ -319,10 +319,17 @@ function Get-ClaudeTranscriptInfo {
                 $Entry = $Line | ConvertFrom-Json
                 if ($Entry.type -eq 'user' -and $Entry.message -and -not $Entry.isMeta) {
                     $UserContent = $Entry.message.content
-                    if ($UserContent -is [string] -and $UserContent -notmatch '^\s*<') {
-                        $UserText = $UserContent.Trim()
-                        if ($UserText.Length -gt $MaxTitleLen) { $UserText = $UserText.Substring(0, $MaxTitleLen - 3) + "..." }
-                        if ($UserText) { $Result.Title = "Q: $UserText"; break }
+                    if ($UserContent -is [string]) {
+                        if ($UserContent -notmatch '^\s*<') {
+                            # 普通用户文本
+                            $UserText = $UserContent.Trim()
+                            if ($UserText.Length -gt $MaxTitleLen) { $UserText = $UserText.Substring(0, $MaxTitleLen - 3) + "..." }
+                            if ($UserText) { $Result.Title = "Q: $UserText"; break }
+                        } elseif ($UserContent -match '<command-name>\s*(/[^<]+?)\s*</command-name>') {
+                            # Slash command — 提取命令名作为标题
+                            $CmdName = $Matches[1].Trim()
+                            if ($CmdName) { $Result.Title = "Q: $CmdName"; break }
+                        }
                     }
                 }
             } catch { Write-DebugLog "Transcript User Parse Error: $_" }
