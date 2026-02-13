@@ -1,5 +1,5 @@
 # Launcher.ps1 - 通知系统启动器
-# 快速入口，负责解析输入、读取窗口标题、启动后台 Worker
+# 快速入口，负责解析输入、注入窗口标题、启动后台 Worker
 
 param(
     [Parameter(Mandatory=$false, Position=0)] [string]$ProjectName_Or_Title,
@@ -106,7 +106,8 @@ for ($i=0; $i -lt $MaxDepth; $i++) {
     } catch { break }
 }
 
-# 4. Read Window Title (读取当前标题，必要时 fallback 为项目名)
+# 4. Inject Title (注入标题，Watchdog 会持续维护)
+$UserCustomTitle = $false
 $ActualTitle = $ProjectName
 
 if ($TargetPid -gt 0) {
@@ -116,26 +117,27 @@ if ($TargetPid -gt 0) {
             # 读取 Console 窗口标题（AttachConsole 后 GetConsoleWindow 返回目标 Shell 的 Console HWND）
             $Hwnd = [WinApi]::GetConsoleWindow()
             if ($Hwnd -eq [IntPtr]::Zero) {
-                # Fallback: GetConsoleWindow 失败时（极罕见）
                 Write-DebugLog "Launcher: GetConsoleWindow returned NULL, fallback to GetForegroundWindow"
                 $Hwnd = [WinApi]::GetForegroundWindow()
             }
             $Sb = [System.Text.StringBuilder]::new(256)
             [WinApi]::GetWindowText($Hwnd, $Sb, 256) | Out-Null
             $CurrentTitle = $Sb.ToString()
+            Write-DebugLog "Launcher: Raw title read='$CurrentTitle'"
 
             if (Test-IsDefaultTitle $CurrentTitle) {
-                # 默认值（Claude Code / PowerShell / cmd）→ 设置为项目名作为 fallback
-                [Console]::Title = $ProjectName
-                $Osc = "$([char]27)]0;$ProjectName$([char]7)"
+                # 默认值（空 / Claude Code / PowerShell / cmd）→ 注入项目名，Watchdog 持续维护
+                $ActualTitle = $ProjectName
+                [Console]::Title = $ActualTitle
+                $Osc = "$([char]27)]0;$ActualTitle$([char]7)"
                 [Console]::Write($Osc)
                 [Console]::Out.Flush()
-                $ActualTitle = $ProjectName
-                Write-DebugLog "Launcher: Fallback title '$ProjectName' into PID $TargetPid"
+                Write-DebugLog "Launcher: Injected title '$ActualTitle' into PID $TargetPid"
             } else {
-                # Claude Code 已设置对话摘要（如 "⠐ 多智能体审查"）→ 直接使用
+                # 非默认标题（用户自定义或 Claude Code 对话摘要）→ 保持不变
+                $UserCustomTitle = $true
                 $ActualTitle = $CurrentTitle
-                Write-DebugLog "Launcher: Using existing title '$CurrentTitle'"
+                Write-DebugLog "Launcher: User custom title detected '$CurrentTitle'. Keeping unchanged."
             }
         } finally {
             [WinApi]::FreeConsole() | Out-Null
@@ -180,6 +182,10 @@ if ($TargetPid -gt 0) { $TargetPidArg = "-TargetPid $TargetPid" }
 $EncActualTitle = [Uri]::EscapeDataString($ActualTitle)
 $ActualTitleArg = "-ActualTitle `"$EncActualTitle`""
 
+# 用户自定义标题 → 跳过 Watchdog 标题注入
+$SkipTitleArg = ""
+if ($UserCustomTitle) { $SkipTitleArg = "-SkipTitleInjection" }
+
 $AudioArg = ""
 if ($AudioPath) {
     $EncAudio = [Uri]::EscapeDataString($AudioPath)
@@ -204,7 +210,7 @@ if ($Payload.tool_input) {
 # 7. Launch Worker
 $WorkerScript = "$Dir\Worker.ps1"
 
-$WorkerProc = Start-Process "pwsh" -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$WorkerScript`" -Worker -Base64Title `"$B64Title`" -Base64Message `"$B64Message`" -ProjectName `"$EncProject`" -NotificationType `"$NotificationType`" $AudioArg $TranscriptArg $DebugArg $DelayArg $TargetPidArg $ActualTitleArg $ToolNameArg $ToolInputArg"
+$WorkerProc = Start-Process "pwsh" -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$WorkerScript`" -Worker -Base64Title `"$B64Title`" -Base64Message `"$B64Message`" -ProjectName `"$EncProject`" -NotificationType `"$NotificationType`" $AudioArg $TranscriptArg $DebugArg $DelayArg $TargetPidArg $SkipTitleArg $ActualTitleArg $ToolNameArg $ToolInputArg"
 
 # 8. Wait Mode
 if ($Wait) {

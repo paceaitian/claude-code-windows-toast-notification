@@ -93,6 +93,7 @@ function Send-ClaudeToast {
     $LaunchUri = "claude-runner:focus?windowtitle=$([Uri]::EscapeDataString($ProjectName))"
     if ($TargetPid -gt 0) { $LaunchUri += "&pid=$TargetPid" }
     if ($NotificationType) { $LaunchUri += "&notification_type=$NotificationType" }
+    # BurntToast 内部已做 XML 转义，不需要手动替换 & 为 &amp;
 
     # 3. Audio Logic
     $FinalSoundPath = $null
@@ -123,16 +124,18 @@ function Send-ClaudeToast {
         $ToolMaxLines = $Script:CONFIG_TOAST_TOOL_MAX_LINES
         $MsgMaxLines = $Script:CONFIG_TOAST_MESSAGE_MAX_LINES
         if (-not $TitleMaxLines) { $TitleMaxLines = 1 }
-        if (-not $ToolMaxLines) { $ToolMaxLines = 1 }
+        if (-not $ToolMaxLines) { $ToolMaxLines = 2 }
         if (-not $MsgMaxLines) { $MsgMaxLines = 2 }
 
         $Text1 = New-BTText -Text $Title -MaxLines $TitleMaxLines
 
         $Children = @($Text1)
 
-        # 工具信息行（截断显示，悬停完整）
+        # 工具信息行（Reminder 场景 pre-expanded 会忽略 MaxLines，需代码截断）
         if ($ToolInfo) {
-            $Text2 = New-BTText -Text $ToolInfo -MaxLines $ToolMaxLines -Wrap
+            $ToolMaxChars = $ToolMaxLines * 50
+            $DisplayToolInfo = if ($ToolInfo.Length -gt $ToolMaxChars) { $ToolInfo.Substring(0, $ToolMaxChars - 3) + "..." } else { $ToolInfo }
+            $Text2 = New-BTText -Text $DisplayToolInfo -MaxLines $ToolMaxLines -Wrap
             $Children += $Text2
         }
 
@@ -155,7 +158,8 @@ function Send-ClaudeToast {
         $DismissBtn = New-BTButton -Content 'Dismiss' -Dismiss
 
         if ($NotificationType -eq 'permission_prompt') {
-            $ApproveBtn = New-BTButton -Content 'Proceed' -Arguments "action=approve&pid=$TargetPid" -ActivationType Protocol
+            $ApproveUri = "claude-runner:approve?action=approve&pid=$TargetPid&windowtitle=$([Uri]::EscapeDataString($ProjectName))"
+            $ApproveBtn = New-BTButton -Content 'Proceed' -Arguments $ApproveUri -ActivationType Protocol
             $Buttons += $ApproveBtn
         }
 

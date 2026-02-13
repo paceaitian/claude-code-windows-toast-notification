@@ -2,7 +2,7 @@
 
 ## 设计理念
 
-Claude Code 会自动管理窗口标题（设置为对话摘要，如 `⠐ 多智能体审查`），且在用户下一次输入前不会修改。本系统利用这一特性：**读取标题而非覆盖标题**，仅在标题为默认值时 fallback 设置项目名。
+Claude Code 2.1.41+ 使用 OSC 转义序列持续覆盖终端标题为 `* Claude Code`（不再设置对话摘要），且 `GetWindowText` 读取到空字符串。本系统采用 **Watchdog 策略**：Launcher 注入项目名作为标题，Worker 在焦点检测期间每秒重新注入，对抗 Claude Code 的覆盖。若未来 Claude Code 恢复对话摘要标题，`Test-IsDefaultTitle()` 会检测到非默认值并跳过注入（`SkipTitleInjection`），Watchdog 仅做焦点检测。
 
 ## 系统架构概览
 
@@ -55,12 +55,12 @@ Claude Code 会自动管理窗口标题（设置为对话摘要，如 `⠐ 多�
    - 找到 Claude 之后的第一个 Shell (`cmd|pwsh|powershell|bash`)
    - 使用 `WinApi::GetParentPid()` P/Invoke 快速遍历
 
-4. **读取窗口标题** (L109-141)
+4. **注入窗口标题** (L109-147)
    - `AttachConsole()` 附加到目标 Shell，读取当前窗口标题
    - 调用 `Test-IsDefaultTitle()` 检测标题类型:
-     - **默认值** (Claude Code / PowerShell / cmd 等) → 设置为项目名作为 fallback
-     - **非默认值** (Claude Code 已设置的对话摘要) → 直接使用，不修改
-   - 将 `$ActualTitle` 传给 Worker 用于焦点检测和 Toast URI
+     - **默认值** (空字符串 / Claude Code / PowerShell / cmd 等) → 注入项目名，Watchdog 持续维护
+     - **非默认值** (用户自定义或 Claude Code 对话摘要) → 保持不变，设 `$SkipTitleInjection`
+   - 将 `$ActualTitle` 和 `$SkipTitleInjection` 传给 Worker
 
 5. **启动 Worker** (L207-210)
    - 编码参数 (Base64 + URI Escape)
@@ -132,11 +132,13 @@ HKCU:\Software\Classes\claude-runner\shell\open\command
    - Base64 解码 Title/Message/ToolInput
    - URI 解码 ProjectName/TranscriptPath/AudioPath/ActualTitle
 
-2. **焦点检测** (L58-83)
-   - 使用 `$ActualTitle` 匹配前台窗口标题
-   - 在 Delay 期间每秒检测一次
+2. **Watchdog 标题注入 + 焦点检测** (L58-129)
+   - `AttachConsole()` 挂载到目标 Shell 的 Console
+   - 在 Delay 期间每秒循环：
+     - 若非 `$SkipTitleInjection`：通过 `[Console]::Title` + OSC 序列注入标题（对抗 Claude Code 覆盖）
+     - 检测前台窗口标题是否包含 `$ActualTitle`
    - **如果用户聚焦 → 立即退出，不发送通知**
-   - 不修改窗口标题（Claude Code 自行管理）
+   - 循环结束后 `FreeConsole()` 清理
 
 3. **最终焦点检查** (L85-89)
    - 再次检查用户是否聚焦
@@ -255,28 +257,30 @@ HKCU:\Software\Classes\claude-runner\shell\open\command
 
 ## 所有运行情况汇总
 
-### 情况 1: Claude Code 已设置对话标题 (主要场景)
+### 情况 1: 标题为空或默认值 (2.1.41+ 主要场景)
 
 ```
 Hook 触发 → Launcher.ps1
   → 找到 Shell PID
-  → 读取当前标题 "⠐ 多智能体审查" (Claude Code 已设置)
-  → Test-IsDefaultTitle() 返回 false → 直接使用
-  → 启动 Worker.ps1 -ActualTitle "⠐ 多智能体审查"
-    → 焦点检测使用 "⠐ 多智能体审查" 匹配
+  → GetWindowText 读取到空字符串（Claude Code 使用 OSC 序列，不走 Console API）
+  → Test-IsDefaultTitle('') 返回 true
+  → 注入项目名 "hooks"
+  → 启动 Worker.ps1 -ActualTitle "hooks"
+    → Watchdog: AttachConsole → 每秒注入标题（对抗 Claude Code 覆盖）
+    → 同时检测焦点
     → 用户未聚焦 → 发送 Toast 通知
-    → 用户点击 Toast → ProtocolHandler 用该标题找到窗口
+    → 用户点击 Toast → ProtocolHandler 用 PID 激活窗口
 ```
 
-### 情况 2: 标题为默认值 (Fallback 场景)
+### 情况 2: 标题为非默认值 (未来兼容场景)
 
 ```
 Hook 触发 → Launcher.ps1
-  → 读取当前标题 "PowerShell" (默认值)
-  → Test-IsDefaultTitle() 返回 true
-  → Fallback: 设置标题为项目名 "hooks"
-  → 启动 Worker.ps1 -ActualTitle "hooks"
-    → 焦点检测使用 "hooks" 匹配
+  → 读取当前标题 "⠐ 多智能体审查" (Claude Code 已设置)
+  → Test-IsDefaultTitle() 返回 false → 保持不变，标记 SkipTitleInjection
+  → 启动 Worker.ps1 -ActualTitle "⠐ 多智能体审查" -SkipTitleInjection
+    → Watchdog: 仅做焦点检测，不注入标题
+    → 用户未聚焦 → 发送 Toast 通知
 ```
 
 ### 情况 3: 用户已聚焦 (不发送通知)
@@ -357,8 +361,8 @@ ProtocolHandler.ps1 收到 action=approve
 
 ```
 notification-system/
-├── Launcher.ps1          # 入口：Hook 触发，读取标题，启动 Worker
-├── Worker.ps1            # 后台进程：焦点检测 + 内容提取 + 发送通知
+├── Launcher.ps1          # 入口：Hook 触发，注入标题，启动 Worker
+├── Worker.ps1            # 后台进程：Watchdog 标题注入 + 焦点检测 + 内容提取 + 发送通知
 ├── ProtocolHandler.ps1   # URI 协议处理：窗口激活 + 按钮动作
 ├── runner.vbs            # VBS 包装器：安全过滤 + 启动 PowerShell
 ├── register-protocol.ps1 # 一次性：注册 URI 协议

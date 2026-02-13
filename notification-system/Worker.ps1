@@ -15,6 +15,7 @@ param(
     [string]$AudioPath,
     [string]$ToolName,
     [string]$Base64ToolInput,
+    [switch]$SkipTitleInjection,
     [string]$ActualTitle
 )
 
@@ -54,8 +55,8 @@ try {
     }
 } catch { Write-DebugLog "Decode Error: $_" }
 
-# 2. Focus Watch (焦点检测，不修改标题)
-# Claude Code 已管理窗口标题，我们只需检测用户是否聚焦
+# 2. Watchdog Logic (持续注入标题 + 焦点检测)
+# Claude Code 2.1.41+ 使用 OSC 序列持续覆盖标题，Watchdog 每秒对抗恢复项目名
 $TitleForFocusCheck = if ($ActualTitle) { $ActualTitle } else { $ProjectName }
 
 function Test-IsFocused {
@@ -69,16 +70,62 @@ function Test-IsFocused {
     return $false
 }
 
-Write-DebugLog "FocusWatch: Delay=$Delay TitleMatch='$TitleForFocusCheck' PID=$TargetPid"
+$InitDelay = $Script:CONFIG_WATCHDOG_INIT_DELAY_MS
+if (-not $InitDelay) { $InitDelay = 300 }
 
-if ($Delay -gt 0) {
-    for ($i = 0; $i -lt $Delay; $i++) {
-        Start-Sleep -Seconds 1
-        if (Test-IsFocused) {
-            Write-DebugLog "FocusWatch: User Focused at T=$($i+1). Exiting."
-            exit 0
+Write-DebugLog "Watchdog: Delay=$Delay TitleMatch='$TitleForFocusCheck' PID=$TargetPid SkipTitle=$SkipTitleInjection"
+
+if ($TargetPid -gt 0 -and $ProjectName) {
+    try {
+        # 初始等待，让 Shell 启动
+        Start-Sleep -Milliseconds $InitDelay
+
+        # 挂载到目标 Shell 的 Console
+        [WinApi]::FreeConsole() | Out-Null
+        if ([WinApi]::AttachConsole($TargetPid)) {
+            Write-DebugLog "Watchdog: Attached to Console (PID $TargetPid)"
+
+            try {
+                $Max = $Delay
+                for ($i = 0; $i -le $Max; $i++) {
+
+                    # A. 强制注入标题（每秒一次）— 对抗 Claude Code OSC 覆盖
+                    if (-not $SkipTitleInjection) {
+                        try {
+                            $TitleToSet = if ($ActualTitle) { $ActualTitle } else { $ProjectName }
+                            [System.Console]::Title = $TitleToSet
+                            $Osc = "$([char]27)]0;$TitleToSet$([char]7)"
+                            [System.Console]::Out.Write($Osc)
+                            [System.Console]::Out.Flush()
+
+                            if ($i -eq 0) { Write-DebugLog "Watchdog: Title Set '$TitleToSet'" }
+                        } catch {}
+                    } else {
+                        if ($i -eq 0) { Write-DebugLog "Watchdog: Skipping title injection (user custom title)" }
+                    }
+
+                    # B. 焦点检测
+                    if (Test-IsFocused) {
+                        Write-DebugLog "Watchdog: User Focused at T=$i. Exiting."
+                        exit 0
+                    }
+
+                    # Sleep（最后一轮不 sleep）
+                    if ($i -lt $Max) { Start-Sleep -Seconds 1 }
+                }
+            } finally {
+                # 确保 FreeConsole 始终执行
+                [WinApi]::FreeConsole() | Out-Null
+            }
+
+        } else {
+            Write-DebugLog "Watchdog: Failed to attach. Running simple delay."
+            Start-Sleep -Seconds $Delay
         }
-    }
+    } catch { Write-DebugLog "Watchdog Error: $_" }
+} else {
+    # Fallback（无 PID）
+    if ($Delay -gt 0) { Start-Sleep -Seconds $Delay }
 }
 
 # 3. Final Safety Focus Check (Post-Loop)
@@ -118,6 +165,15 @@ if ($TranscriptPath) {
     if ($ToolInfo -and $Info.ResponseTime) {
         $ToolInfo = "[$($Info.ResponseTime)] $ToolInfo"
     }
+}
+
+# 添加 "A:" 前缀标记回复内容（与 Title 的 "Q:" 对应）
+if ($ToolInfo) {
+    $ToolInfo = "A: $ToolInfo"
+} elseif ($Description) {
+    $TimePrefix = ""
+    if ($Info -and $Info.ResponseTime) { $TimePrefix = "[$($Info.ResponseTime)] " }
+    $Description = "A: $TimePrefix$Description"
 }
 
 Write-DebugLog "Title: $Title"

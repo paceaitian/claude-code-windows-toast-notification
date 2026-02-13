@@ -88,9 +88,9 @@ function Format-ClaudeToolInfo {
     else {
         switch -Regex ($Name) {
             "^Bash$" {
-                # 优先使用 description（更易读），fallback 到 command（详细命令）
-                if ($InputObj.description) { $Detail = $InputObj.description }
-                elseif ($InputObj.command) { $Detail = $InputObj.command }
+                # 显示实际命令（用户更关心具体执行了什么），description 留给 Toast Description 行
+                if ($InputObj.command) { $Detail = $InputObj.command }
+                elseif ($InputObj.description) { $Detail = $InputObj.description }
             }
             "^Skill$" {
                 # Skill 工具：显示 skill 名称 + description
@@ -143,8 +143,7 @@ function Format-ClaudeToolInfo {
         }
 
         if ($Detail.Length -gt $MaxLen) { $Detail = $Detail.Substring(0, $MaxLen - 3) + "..." }
-        # XML 转义（注意：必须先转义 & 避免二次转义）
-        $Detail = $Detail -replace "&", "&amp;" -replace "<", "&lt;" -replace ">", "&gt;"
+        # BurntToast 内部已做 XML 转义（AdaptiveText.Text → ToastContent.GetContent()），不需要手动转义
         return "[$DisplayName] $Detail"
     }
     return "[$DisplayName]"
@@ -183,12 +182,14 @@ function Get-ClaudeContentFromPayload {
     if ($ToolName) {
         $Result.ToolInfo = Format-ClaudeToolInfo -Name $ToolName -InputObj $ToolInput
 
-        # 处理描述文本
+        # 处理描述文本：Message 优先，fallback 到 tool_input.description
         if ($Message -and $Message -ne "Task finished.") {
             $MaxLen = $Script:CONFIG_MESSAGE_MAX_LENGTH
             if (-not $MaxLen) { $MaxLen = 800 }
             if ($Message.Length -gt $MaxLen) { $Message = $Message.Substring(0, $MaxLen - 3) + "..." }
             $Result.Description = $Message
+        } elseif ($ToolInput -and $ToolInput.description) {
+            $Result.Description = $ToolInput.description
         }
     }
     return $Result
@@ -232,6 +233,7 @@ function Get-ClaudeTranscriptInfo {
         $TranscriptLines = Get-Content $TranscriptPath -Tail 50 -Encoding UTF8 -ErrorAction Stop
 
         $ResponseTime = ""
+        $UserEntryCount = 0
 
         # 1. Extract Last Assistant Message
         for ($i = $TranscriptLines.Count - 1; $i -ge 0; $i--) {
@@ -239,7 +241,13 @@ function Get-ClaudeTranscriptInfo {
             try {
                 $Entry = $Line | ConvertFrom-Json
 
-                if ($Entry.type -eq 'user' -and $Entry.message) { break }
+                if ($Entry.type -eq 'user' -and $Entry.message) {
+                    $UserEntryCount++
+                    # 已有 ToolInfo 或跨越了 1 条以上 user 消息 → 停止
+                    # 允许跨过 1 条 user 消息：覆盖权限确认后 tool_use 在更早 assistant 条目的场景
+                    if ($Result.ToolInfo -or $UserEntryCount -gt 1) { break }
+                    continue
+                }
 
                 $Content = $null
                 if ($Entry.type -eq 'assistant' -and $Entry.message) {
@@ -275,8 +283,10 @@ function Get-ClaudeTranscriptInfo {
                             -replace '`([^`]+)`', '$1' `
                             -replace '\[([^\]]+)\]\([^)]+\)', '$1' `
                             -replace '^\s*[-*]\s+', '' `
+                            -replace '\|[-:\s]+\|', '' `
+                            -replace '\|', ' ' `
                             -replace '\r?\n', ' '
-                        $CleanText = $CleanText.Trim()
+                        $CleanText = ($CleanText -replace '\s{2,}', ' ').Trim()
 
                         $MaxLen = $Script:CONFIG_MESSAGE_MAX_LENGTH
                         if (-not $MaxLen) { $MaxLen = 800 }
@@ -287,9 +297,14 @@ function Get-ClaudeTranscriptInfo {
                     # notification_type 只信任 Launcher 从 payload 中提取的值
                     # 不从回复文本中猜测（"permission"/"proceed" 等词在普通消息中会误判）
 
-                    $Result.Description = $TextString
+                    # 只在有实际文本时才更新（避免 tool_use-only entry 覆盖已找到的文本）
+                    if ($TextString) {
+                        $Result.Description = $TextString
+                    }
 
-                    if ($Result.ToolInfo -or $Result.Description) { break }
+                    # 必须同时找到 ToolInfo 和 Description 才停止
+                    # 避免只有 Description 就 break，导致丢失前面的 tool_use 条目
+                    if ($Result.ToolInfo -and $Result.Description) { break }
                 }
             } catch { Write-DebugLog "Transcript JSON Parse Error: $_" }
         }

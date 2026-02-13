@@ -48,32 +48,120 @@ try {
         }
     }
 
-    # Strategy B: PID (Process)
+    # Strategy B: PID (Process) - 先拉起 WT 窗口，再用 UI Automation 切换 tab
     elseif ($PidArg -ne 0) {
         Write-DebugLog "PROTOCOL: Target PID $PidArg"
-        $Proc = Get-Process -Id $PidArg -ErrorAction SilentlyContinue
 
-        if ($Proc -and $Proc.MainWindowHandle -ne [IntPtr]::Zero) {
-            $Handle = $Proc.MainWindowHandle
-            # 验证窗口句柄有效性（进程可能在获取后终止）
-            if ([WinApi]::IsWindow($Handle)) {
-                if ([WinApi]::IsIconic($Handle)) {
-                    [WinApi]::ShowWindow($Handle, 9)
+        # B1: 沿进程树向上找到 WindowsTerminal 进程 ID
+        $WtPid = 0
+        $ClimbPid = $PidArg
+        for ($i = 0; $i -lt 10; $i++) {
+            $p = Get-Process -Id $ClimbPid -ErrorAction SilentlyContinue
+            if (-not $p) { break }
+            if ($p.ProcessName -eq 'WindowsTerminal') {
+                $WtPid = $ClimbPid
+                Write-DebugLog "PROTOCOL: Found WT process PID $WtPid"
+                break
+            }
+            $ParentPid = [WinApi]::GetParentPid($ClimbPid)
+            if ($ParentPid -eq 0 -or $ParentPid -eq $ClimbPid) { break }
+            $ClimbPid = $ParentPid
+        }
+
+        # B2: 重新注入标题 + UI Automation 搜索所有 WT 窗口切换 tab
+        $TabSwitchedByUIA = $false
+        if (-not [string]::IsNullOrWhiteSpace($WindowTitle)) {
+            # B2a: 重新注入标题（Watchdog 已退出时的安全网）
+            try {
+                [WinApi]::FreeConsole() | Out-Null
+                if ([WinApi]::AttachConsole([uint32]$PidArg)) {
+                    [Console]::Title = $WindowTitle
+                    [Console]::Write("`e]0;$WindowTitle`a")
+                    [WinApi]::FreeConsole() | Out-Null
+                    Write-DebugLog "PROTOCOL: Re-injected title '$WindowTitle' into PID $PidArg"
+                    Start-Sleep -Milliseconds 200
+                } else {
+                    Write-DebugLog "PROTOCOL: AttachConsole($PidArg) failed"
                 }
-                $Success = [WinApi]::SetForegroundWindow($Handle)
-                Write-DebugLog "PROTOCOL: SetForegroundWindow(PID_Handle) -> $Success"
-            } else {
-                Write-DebugLog "PROTOCOL: PID $PidArg window handle is no longer valid"
+            } catch {
+                [WinApi]::FreeConsole() | Out-Null
+                Write-DebugLog "PROTOCOL: Title re-injection failed: $_"
+            }
+
+            # B2b: 搜索 WT 进程的所有窗口，找到包含目标 tab 的窗口并切换
+            try {
+                Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+                $desktopRoot = [System.Windows.Automation.AutomationElement]::RootElement
+
+                # 找到 WT 进程拥有的所有顶层窗口
+                $pidCondition = New-Object System.Windows.Automation.PropertyCondition(
+                    [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $WtPid)
+                $wtWindows = $desktopRoot.FindAll(
+                    [System.Windows.Automation.TreeScope]::Children, $pidCondition)
+                Write-DebugLog "PROTOCOL: UIA found $($wtWindows.Count) WT window(s) for PID $WtPid"
+
+                $targetTab = $null
+                $targetWindow = $null
+                $tabTypeCondition = New-Object System.Windows.Automation.PropertyCondition(
+                    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                    [System.Windows.Automation.ControlType]::TabItem)
+
+                foreach ($wt in $wtWindows) {
+                    $tabs = $wt.FindAll(
+                        [System.Windows.Automation.TreeScope]::Descendants, $tabTypeCondition)
+                    foreach ($t in $tabs) {
+                        if ($t.Current.Name -like "*$WindowTitle*") {
+                            $targetTab = $t
+                            $targetWindow = $wt
+                            break
+                        }
+                    }
+                    if ($targetTab) { break }
+                }
+
+                if ($targetTab) {
+                    # 先激活正确的 WT 窗口
+                    $correctHwnd = [IntPtr]::new($targetWindow.Current.NativeWindowHandle)
+                    if ([WinApi]::IsIconic($correctHwnd)) { [WinApi]::ShowWindow($correctHwnd, 9) }
+                    [WinApi]::SetForegroundWindow($correctHwnd) | Out-Null
+                    Write-DebugLog "PROTOCOL: Activated correct WT window (HWND $correctHwnd)"
+                    Start-Sleep -Milliseconds 50
+
+                    # 切换 tab
+                    $selPattern = $targetTab.GetCurrentPattern(
+                        [System.Windows.Automation.SelectionItemPattern]::Pattern)
+                    $selPattern.Select()
+                    $TabSwitchedByUIA = $true
+                    $Success = $true
+                    Write-DebugLog "PROTOCOL: UIA Selected tab '$($targetTab.Current.Name)'"
+
+                    # 点击终端内容区激活输入焦点（UIA Select 后焦点留在 tab 栏）
+                    Start-Sleep -Milliseconds 100
+                    [WinApi]::ClickWindowCenter($correctHwnd)
+                    Write-DebugLog "PROTOCOL: Clicked window center to focus terminal pane"
+                } else {
+                    Write-DebugLog "PROTOCOL: UIA tab '$WindowTitle' not found in any WT window"
+                }
+            } catch {
+                Write-DebugLog "PROTOCOL: UIA failed: $_"
             }
         }
 
-        # Fallback: AppActivate
-        if (-not $Success) {
-            Write-DebugLog "PROTOCOL: Trying fallback AppActivate($PidArg)..."
-            $wshell = New-Object -ComObject WScript.Shell
-            if ($wshell.AppActivate($PidArg)) {
-                $Success = $true
-                Write-DebugLog "PROTOCOL: AppActivate Success."
+        # B3: 降级 — UIA 失败时用 PID 拉起窗口
+        if (-not $Success -and $WtPid -ne 0) {
+            $wtProc = Get-Process -Id $WtPid -ErrorAction SilentlyContinue
+            if ($wtProc -and $wtProc.MainWindowHandle -ne [IntPtr]::Zero) {
+                $h = $wtProc.MainWindowHandle
+                if ([WinApi]::IsIconic($h)) { [WinApi]::ShowWindow($h, 9) }
+                $Success = [WinApi]::SetForegroundWindow($h)
+                Write-DebugLog "PROTOCOL: Fallback SetForegroundWindow(WT) -> $Success"
+            }
+            if (-not $Success) {
+                $wshell = New-Object -ComObject WScript.Shell
+                if ($wshell.AppActivate($PidArg)) {
+                    $Success = $true
+                    Write-DebugLog "PROTOCOL: Fallback AppActivate(PID) Success."
+                }
             }
         }
     }
@@ -102,7 +190,7 @@ try {
         }
     }
 
-    # 3. Action Logic (Button Click) - 修复：匹配 action=approve
+    # 3. Action Logic (Button Click)
     if ($UriArgs -match "action=approve") {
         Write-DebugLog "PROTOCOL: Action 'Approve' detected."
 
@@ -110,8 +198,17 @@ try {
         if (-not $SendKeysDelay) { $SendKeysDelay = 250 }
         Start-Sleep -Milliseconds $SendKeysDelay
 
-        # 验证当前窗口是否正确（双重验证减少竞态条件）
-        if ($WindowTitle) {
+        if ($TabSwitchedByUIA -and $PidArg -gt 0) {
+            # UIA 已精确切换到目标 tab，用 WriteConsoleInput 直接写入控制台（绕过窗口焦点）
+            $Sent = [WinApi]::SendConsoleKey([uint32]$PidArg, [char]'1')
+            Write-DebugLog "PROTOCOL: Tab switched by UIA. SendConsoleKey(PID $PidArg) -> $Sent"
+            if (-not $Sent) {
+                # 降级：用 SendKeys（需要窗口焦点正确）
+                Write-DebugLog "PROTOCOL: Fallback to SendKeys..."
+                $wshell = New-Object -ComObject WScript.Shell
+                $wshell.SendKeys("1")
+            }
+        } elseif ($WindowTitle) {
             $Hwnd = [WinApi]::GetForegroundWindow()
             $Sb = [System.Text.StringBuilder]::new(256)
             [WinApi]::GetWindowText($Hwnd, $Sb, 256) | Out-Null

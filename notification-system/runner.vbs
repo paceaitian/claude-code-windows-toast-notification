@@ -25,16 +25,15 @@ Set args = WScript.Arguments
 If args.Count > 0 Then
     ProtoArg = args(0)
 
-    ' 安全检查：过滤危险字符（防止命令注入）
+    ' 安全检查：过滤 shell 注入字符（保留 URI 合法字符 & 和 %）
+    ' & 是 URI 参数分隔符，% 是 URL 编码前缀，在 pwsh -File 上下文中无注入风险
     ProtoArg = Replace(ProtoArg, """", "")
-    ProtoArg = Replace(ProtoArg, "&", "")
     ProtoArg = Replace(ProtoArg, "|", "")
     ProtoArg = Replace(ProtoArg, ";", "")
     ProtoArg = Replace(ProtoArg, "`", "")
     ProtoArg = Replace(ProtoArg, "$", "")
     ProtoArg = Replace(ProtoArg, "(", "")
     ProtoArg = Replace(ProtoArg, ")", "")
-    ProtoArg = Replace(ProtoArg, "%", "")
     ProtoArg = Replace(ProtoArg, "<", "")
     ProtoArg = Replace(ProtoArg, ">", "")
     ProtoArg = Replace(ProtoArg, vbCr, "")
