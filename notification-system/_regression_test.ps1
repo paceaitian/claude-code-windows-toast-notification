@@ -339,6 +339,55 @@ if (Test-Path $AuroraPath) {
 }
 
 # ============================================================================
+# 测试 14: 跨 user 边界时 Description 不被旧文本覆盖
+# ============================================================================
+Write-Section "14. Description 跨 user 边界保护"
+
+$CrossTestDir = Join-Path $env:TEMP "toast-cross-test-$(Get-Random)"
+New-Item -ItemType Directory -Path $CrossTestDir -Force | Out-Null
+$CrossTestFile = Join-Path $CrossTestDir "cross_test.jsonl"
+
+# Case 1: 当前助手回复无 tool_use，旧助手回复也无 tool_use → 应保留新 Description
+$CrossLines1 = @(
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"旧回复：Stop 时再强制创建 TodoWrite 毫无意义"}]},"timestamp":"2026-02-14T15:32:48+08:00"}'
+    '{"type":"system","subtype":"stop_hook_summary","hookCount":1}'
+    '{"type":"user","message":{"content":"好的，现在还需要测试什么？"},"timestamp":"2026-02-14T15:33:53+08:00"}'
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"\n\n"}]},"timestamp":"2026-02-14T15:33:59+08:00"}'
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"新回复：本次修改都是非功能性的"}]},"timestamp":"2026-02-14T15:34:45+08:00"}'
+)
+$CrossLines1 | Set-Content $CrossTestFile -Encoding UTF8
+
+$CrossResult1 = Get-ClaudeTranscriptInfo -TranscriptPath $CrossTestFile -ProjectName "test"
+Test-Assert "新 Description 不被旧文本覆盖" ($CrossResult1.Description -match '新回复')
+Write-Host "         Got: $($CrossResult1.Description)" -ForegroundColor DarkGray
+
+# Case 2: 当前助手有 tool_use → 正常 break，不受影响
+$CrossLines2 = @(
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"旧回复内容"}]},"timestamp":"2026-02-14T15:30:00+08:00"}'
+    '{"type":"user","message":{"content":"执行测试"},"timestamp":"2026-02-14T15:31:00+08:00"}'
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"npm test"}},{"type":"text","text":"测试通过"}]},"timestamp":"2026-02-14T15:32:00+08:00"}'
+)
+$CrossLines2 | Set-Content $CrossTestFile -Encoding UTF8
+
+$CrossResult2 = Get-ClaudeTranscriptInfo -TranscriptPath $CrossTestFile -ProjectName "test"
+Test-Assert "有 tool_use 时正常提取" ($CrossResult2.Description -eq '测试通过' -and $CrossResult2.ToolInfo -match 'Bash')
+Write-Host "         Got: D=$($CrossResult2.Description) T=$($CrossResult2.ToolInfo)" -ForegroundColor DarkGray
+
+# Case 3: 当前助手只有 thinking chunk（无 text）→ Description 应为空或来自更早的有效文本
+$CrossLines3 = @(
+    '{"type":"user","message":{"content":"你好"},"timestamp":"2026-02-14T15:40:00+08:00"}'
+    '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"思考中..."}]},"timestamp":"2026-02-14T15:40:05+08:00"}'
+)
+$CrossLines3 | Set-Content $CrossTestFile -Encoding UTF8
+
+$CrossResult3 = Get-ClaudeTranscriptInfo -TranscriptPath $CrossTestFile -ProjectName "test"
+Test-Assert "thinking-only 回复 Description 为空" ($null -eq $CrossResult3.Description -or $CrossResult3.Description -eq '')
+Write-Host "         Got: $($CrossResult3.Description)" -ForegroundColor DarkGray
+
+# 清理
+Remove-Item $CrossTestDir -Recurse -Force -ErrorAction SilentlyContinue
+
+# ============================================================================
 # 结果汇总
 # ============================================================================
 Write-Host ""

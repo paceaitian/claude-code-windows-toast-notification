@@ -297,8 +297,8 @@ function Get-ClaudeTranscriptInfo {
                     # notification_type 只信任 Launcher 从 payload 中提取的值
                     # 不从回复文本中猜测（"permission"/"proceed" 等词在普通消息中会误判）
 
-                    # 只在有实际文本时才更新（避免 tool_use-only entry 覆盖已找到的文本）
-                    if ($TextString) {
+                    # 只在尚无 Description 时更新（保留最新的文本，防止跨 user 边界后旧文本覆盖）
+                    if ($TextString -and -not $Result.Description) {
                         $Result.Description = $TextString
                     }
 
