@@ -1,116 +1,228 @@
-# Claude Code Windows Notification System (模块化版)
+# Claude Code Windows Hooks
 
-一个为 [Claude Code](https://github.com/anthropics/claude-code) 量身定制的高性能、上下文感知的 Windows 通知系统。
+为 [Claude Code](https://github.com/anthropics/claude-code) 定制的 Windows Hook 工具集。
 
-## 🌟 核心特性 (Key Features)
+## 目录
 
-*   **⚡ 极速启动**: 采用模块化设计与 P/Invoke 优化，通知延迟从 ~5秒降低至 **~1秒**。
-*   **🧠 智能感知**: 能够识别工具调用、子代理 (Subagent) 任务，并区分“任务完成”与“权限请求”。
-*   **🔊 智能音频**:
-    *   **权限请求**: 自动播放高优先级提示音 (如 `Aurora.mp3`)，提醒您需要人工介入。
-    *   **普通任务**: 使用系统默认提示音，保持低打扰。
-*   **🛡️ 非阻塞运行**: 通知逻辑在后台进程中运行，确保终端立即响应。
-*   **🔗 交互式点击**: 点击通知可直接激活 Claude Code 所在的窗口或标签页 (通过 `claude-runner://` 协议)。
+- [Notification System](#notification-system) — 智能 Toast 通知 + 窗口激活
+- [Bash Permission Enforcer](#bash-permission-enforcer) — 强制执行 Bash 权限规则
 
-## 📂 系统架构 (Architecture)
+---
 
-本系统由两个主要部分组成：
+## Notification System
 
-### 1. 通知子系统 (`hooks/notification-system/`)
-负责生成和显示通知。
-- **`Launcher.ps1`**: **启动器**。快速入口，负责注入窗口标题并启动后台 Worker。
-- **`Worker.ps1`**: **后台进程**。负责解析 Transcript、播放音频和显示 Toast。
-- **`Lib/Transcript.ps1`**: **解析核心**。提取上下文信息（如提取 `[Bash] rm -rf` 命令详情）。
-- **`Lib/Toast.ps1`**: **UI 核心**。调用 BurntToast 显示通知，并绑定点击事件到协议。
+高性能、上下文感知的 Windows Toast 通知系统。当 Claude Code 需要用户关注时（权限请求、任务完成），自动发送桌面通知并支持一键切换回对应 Tab。
 
-### 2. 协议处理器 (`hooks/notification-system/ProtocolHandler.ps1`)
-负责响应通知点击事件。
-- 当用户点击 Toast 通知或按钮（如 "Proceed"）时，系统触发 `claude-runner://` 协议。
-- **`ProtocolHandler.ps1`**: 接收协议请求，自动查找并激活对应的 Windows Terminal 窗口/标签页，甚至自动发送确认键（如 `y` 或 `Enter`）。
+### 核心特性
 
-## 🚀 安装与配置 (Installation)
+- **极速启动**: 模块化设计 + P/Invoke，通知延迟 ~1 秒
+- **智能内容**: 解析 Transcript 提取用户问题、工具调用、AI 回复
+- **Tab 切换**: 点击通知自动激活 Windows Terminal 对应 Tab（UIA 自动化）
+- **一键审批**: 权限请求通知带 Approve 按钮，点击直接发送确认键
+- **焦点检测**: 用户已在窗口前时自动跳过通知
+- **标题注入**: Watchdog 每秒注入项目名，对抗 Claude Code 的 OSC 标题覆盖
+- **去重机制**: 基于内容哈希的 UniqueId 防止重复通知
 
-### 第一步：注册协议 (一次性)
-为了让点击通知能跳转回 Claude，需要注册自定义协议。
-在 PowerShell (管理员) 中运行：
+### 架构
+
+```
+Hook 触发 (Notification/Stop)
+    │
+    ▼
+Launcher.ps1          # 入口：注入标题，启动后台 Worker
+    │
+    ▼
+Worker.ps1            # 后台：Watchdog 焦点检测 → 解析 Payload/Transcript → 发送 Toast
+    ├── Lib/Config.ps1       # 配置常量（延迟、截断长度等）
+    ├── Lib/Common.ps1       # 调试日志、Test-IsDefaultTitle、工具函数
+    ├── Lib/Transcript.ps1   # Transcript JSONL 解析、工具信息格式化、Markdown 清理
+    ├── Lib/Toast.ps1        # BurntToast 通知构建、URI 协议绑定
+    └── Lib/Native.ps1       # Win32 P/Invoke（窗口操作、进程树、控制台 API）
+
+用户点击 Toast
+    │
+    ▼
+runner.vbs → ProtocolHandler.ps1   # URI 协议处理：Tab 切换、标题注入、Approve 按键
+```
+
+### Toast 内容格式
+
+```
+┌──────────────────────────────────────┐
+│ Q: 用户的问题                          │  ← Title (从 Transcript 提取最新用户消息)
+│ A: [02:05] [Bash] git push           │  ← ToolInfo (工具名 + 命令/路径, 最多 2 行)
+│ 已推送到远程。收工！                    │  ← Description (AI 回复文本)
+│                    [Approve] [Focus]  │  ← 按钮 (权限请求时显示 Approve)
+└──────────────────────────────────────┘
+```
+
+### 安装
+
+**1. 安装依赖**
+
+```powershell
+Install-Module BurntToast -Scope CurrentUser
+```
+
+**2. 注册 URI 协议（管理员权限，一次性）**
+
 ```powershell
 cd ~/.claude/hooks/notification-system
 .\register-protocol.ps1
 ```
 
-### 第二步：配置 Claude Code
-修改 `~/.claude/settings.json`，添加以下 Hooks 配置：
+**3. 配置 `~/.claude/settings.json`**
 
 ```json
-"hooks": {
-  "Notification": [
-    {
-      "hooks": [{
-        "command": "pwsh -NoProfile -ExecutionPolicy Bypass -Command \"if ($env:CLAUDE_NO_NOTIFICATION -ne '1' -and -not (Test-Path '.claude/no-notification')) { $input | & 'C:/Users/Xiao/.claude/hooks/notification-system/Launcher.ps1' -AudioPath 'C:/Users/Xiao/OneDrive/Aurora.wav' -Delay 10 }\"",
-        "type": "command"
-      }],
-      "matcher": "permission_prompt"
-    }
-  ],
-  "Stop": [
-    {
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "permission_prompt",
         "hooks": [{
-          "command": "pwsh -NoProfile -ExecutionPolicy Bypass -Command \"if ($env:CLAUDE_NO_NOTIFICATION -ne '1' -and -not (Test-Path '.claude/no-notification')) { $input | & 'C:/Users/Xiao/.claude/hooks/notification-system/Launcher.ps1' -AudioPath 'C:/Users/Xiao/OneDrive/Aurora.wav' -Delay 20 }\"",
-          "type": "command"
-        }],
-        "matcher": ""
-    }
-  ]
+          "type": "command",
+          "command": "pwsh -NoProfile -ExecutionPolicy Bypass -Command \"if ($env:CLAUDE_NO_NOTIFICATION -ne '1' -and -not (Test-Path '.claude/no-notification')) { $input | & 'C:/Users/Xiao/.claude/hooks/notification-system/Launcher.ps1' -AudioPath 'C:/Users/Xiao/OneDrive/Aurora.wav' -Delay 10 -EnableDebug }\""
+        }]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [{
+          "type": "command",
+          "command": "pwsh -NoProfile -ExecutionPolicy Bypass -Command \"if ($env:CLAUDE_NO_NOTIFICATION -ne '1' -and -not (Test-Path '.claude/no-notification')) { $input | & 'C:/Users/Xiao/.claude/hooks/notification-system/Launcher.ps1' -AudioPath 'C:/Users/Xiao/OneDrive/Aurora.wav' -Delay 20 -EnableDebug }\""
+        }]
+      }
+    ]
+  }
 }
 ```
 
-## 🎵 音频逻辑 (Audio Logic)
-
-系统根据以下优先级决定播放什么声音：
-
-1.  **最高优先级：强制指定** (`-AudioPath`)
-    *   如果在 `settings.json` 中传入了 `-AudioPath`，则**无论什么情况**都播放该音频。
-
-2.  **智能默认：上下文感知** (当未指定 `-AudioPath` 时)
-    *   **权限请求 (Permission)**: 尝试播放 `~/OneDrive/Aurora.mp3`。
-    *   **普通任务 (Stop)**: 播放 Windows 系统默认通知音。
-
-3.  **静音回退**
-    *   如果找不到音频文件，则仅显示静音通知。
-
-## 🤫 静音控制 (Suppress Notifications)
-
-您可以通过以下两种方式临时或永久禁用通知：
-
-### 1. 环境变量控制 (临时)
-设置环境变量 `CLAUDE_NO_NOTIFICATION=1` 即可禁用所有通知。
-适用于 CI/CD 或特定脚本启动场景。
-
-**示例 (PowerShell Profile)**:
-```powershell
-function happy {
-    $env:CLAUDE_NO_NOTIFICATION = '1'
-    try { & 'claude' @args } finally { $env:CLAUDE_NO_NOTIFICATION = '' }
-}
-```
-
-### 2. 项目级配置文件 (持久)
-在项目根目录的 `.claude/` 文件夹下创建一个名为 `no-notification` 的空文件。
-系统检测到该文件存在时，会自动跳过该项目的所有通知。
-适用于不需要通知的特定项目。
-
-## ⚙️ 参数说明 (Parameters)
+### 参数
 
 | 参数 | 说明 |
 | :--- | :--- |
-| `-AudioPath` | **(可选)** 强制指定通知音效文件的路径。 |
-| `-Delay` | **(可选)** 延迟几秒后显示通知。对于“权限请求”很有用，可以防止通知过早消失。 |
-| `-Wait` | **(可选)** 阻塞模式。脚本会等待直到通知被点击或消失。通常不需要开启。 |
-| `-EnableDebug`| **(可选)** 开启调试模式。日志将写入 `~/.claude/toast_debug.log`。 |
+| `-AudioPath` | 自定义通知音效文件路径 |
+| `-Delay` | 延迟秒数（权限请求建议 10，Stop 建议 20） |
+| `-EnableDebug` | 开启调试日志 `~/.claude/toast_debug.log` |
 
-## 🔍 故障排查 (Troubleshooting)
+### 静音控制
 
-如果通知没有出现或点击无反应：
-1.  **检查协议**: 运行 `Start-Process "claude-runner://test"`，看是否触发脚本（或报错）。
-2.  **检查日志**: 在配置中添加 `-EnableDebug`，然后查看 `~/.claude/toast_debug.log`。
-3.  **检查依赖**: 确保 `BurntToast` 模块已安装 (`Install-Module BurntToast`)。
+- **环境变量**: `CLAUDE_NO_NOTIFICATION=1`
+- **项目级**: 在项目 `.claude/` 目录下创建 `no-notification` 空文件
+
+### 测试
+
+```powershell
+cd ~/.claude/hooks/notification-system
+# 回归测试（50+ 用例）
+pwsh -NoProfile -ExecutionPolicy Bypass -File _regression_test.ps1
+# E2E 测试（60+ 用例）
+pwsh -NoProfile -ExecutionPolicy Bypass -File _e2e_test.ps1
+```
+
+---
+
+## Bash Permission Enforcer
+
+绕过 Claude Code 的 [Bash 权限匹配 bug](https://github.com/anthropics/claude-code/issues/25441)，直接读取 `settings.json` 权限规则并强制执行。
+
+### 问题背景
+
+Claude Code 的原生权限系统存在已知缺陷：
+- 通配符不匹配多行/heredoc 命令（[#25441](https://github.com/anthropics/claude-code/issues/25441)）
+- 通配符不匹配含重定向符（`2>&1`）的命令（[#13137](https://github.com/anthropics/claude-code/issues/13137)）
+- Deny 规则可通过命令变体绕过（如 `git -C /path reset --hard`）
+- 前缀匹配与通配符匹配行为不一致（[#18961](https://github.com/anthropics/claude-code/issues/18961)）
+
+### 工作原理
+
+```
+Claude Code 调用 Bash 工具
+    │
+    ▼
+PreToolUse Hook 触发 (matcher: "Bash")
+    │
+    ▼
+enforce-bash-permissions.ps1
+    ├── 读取 settings.json 的 permissions.allow / permissions.deny
+    ├── 将多行命令折叠为单行（修复原生 bug）
+    ├── 先检查 deny 规则（优先级最高）→ 返回 deny
+    ├── 再检查 allow 规则 → 返回 allow
+    └── 无匹配 → 不返回决定，交由原生权限系统处理
+```
+
+### 规则匹配
+
+脚本读取 `settings.json` 中的标准 Claude Code 权限格式：
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls *)",
+      "Bash(echo *)",
+      "Bash(git log *)"
+    ],
+    "deny": [
+      "Bash(rm -rf *)"
+    ]
+  }
+}
+```
+
+**匹配逻辑：**
+- `Bash(ls)` → 精确匹配 `ls`
+- `Bash(ls *)` → 匹配 `ls` 开头的任意命令（`ls -la`、`ls /tmp` 等）
+- `Bash` → 匹配所有 Bash 命令
+- 多行命令自动折叠为单行后匹配（原生系统无法做到）
+- Deny 规则优先于 Allow 规则
+
+### 配置
+
+在 `~/.claude/settings.json` 的 hooks 中添加：
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [{
+          "type": "command",
+          "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File C:/Users/Xiao/.claude/hooks/enforce-bash-permissions.ps1"
+        }]
+      }
+    ]
+  }
+}
+```
+
+### 行为示例
+
+| 命令 | 规则 | Hook 决定 | 原生系统 |
+| :--- | :--- | :--- | :--- |
+| `ls -la` | `Bash(ls *)` ✅ | allow | 跳过 |
+| `echo hello` | `Bash(echo *)` ✅ | allow | 跳过 |
+| `rm -rf /tmp` | `Bash(rm -rf *)` ❌ | **deny** | 跳过 |
+| `git status` | 无匹配 | 无决定 | 弹窗询问 |
+| 多行 heredoc | `Bash(cat *)` ✅ | allow（折叠后匹配） | 匹配失败 |
+
+---
+
+## 故障排查
+
+| 问题 | 排查方法 |
+| :--- | :--- |
+| Toast 不出现 | 添加 `-EnableDebug`，查看 `~/.claude/toast_debug.log` |
+| 点击通知无反应 | 运行 `Start-Process "claude-runner://test"` 检查协议注册 |
+| BurntToast 缺失 | `Install-Module BurntToast -Scope CurrentUser` |
+| 权限 hook 不生效 | 重启 Claude Code（settings.json 的 hooks 变更需要重启） |
+| Tab 切换失败 | 检查日志中的 `PROTOCOL:` 行，确认 UIA 是否找到窗口 |
+
+## 依赖
+
+- Windows 11
+- PowerShell 7+ (`pwsh`)
+- [BurntToast](https://github.com/Windos/BurntToast) PowerShell 模块
+- Windows Terminal（Tab 切换依赖 UIA 自动化）
