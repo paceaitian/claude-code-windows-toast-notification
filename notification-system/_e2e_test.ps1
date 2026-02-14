@@ -12,8 +12,7 @@ function Test-IsDefaultTitle([string]$Title) {
     if ([string]::IsNullOrWhiteSpace($Title)) { return $true }
     $ClaudePatterns = @(
         '^[*·✻.\s\u2800-\u28FF]*Claude Code$',
-        '^claude\s+-\s*.+$',
-        '^[\u2800-\u28FF]'
+        '^claude\s+-\s*.+$'
     )
     $ShellPatterns = @(
         '^PowerShell$', '^Windows PowerShell$', '^pwsh$',
@@ -55,8 +54,8 @@ Assert-Equal (Test-IsDefaultTitle '* Claude Code') $true '* Claude Code (待机)
 Assert-Equal (Test-IsDefaultTitle "`u{00b7} Claude Code") $true '· Claude Code (thinking)'
 Assert-Equal (Test-IsDefaultTitle "`u{273b} Claude Code") $true '✻ Claude Code (thinking2)'
 Assert-Equal (Test-IsDefaultTitle '. Claude Code') $true '. Claude Code (运行)'
-Assert-Equal (Test-IsDefaultTitle "`u{2810} 多智能体审查") $true 'Braille前缀+对话名'
-Assert-Equal (Test-IsDefaultTitle "`u{2801} some topic") $true 'Braille前缀+英文话题'
+Assert-Equal (Test-IsDefaultTitle "`u{2810} 多智能体审查") $false 'Braille前缀+对话名 → 非默认(可能是2.1.42会话标题)'
+Assert-Equal (Test-IsDefaultTitle "`u{2801} some topic") $false 'Braille前缀+英文话题 → 非默认'
 Assert-Equal (Test-IsDefaultTitle 'claude - hooks') $true 'claude - 目录格式'
 Assert-Equal (Test-IsDefaultTitle 'PowerShell') $true 'PowerShell'
 Assert-Equal (Test-IsDefaultTitle 'Windows PowerShell') $true 'Windows PowerShell'
@@ -124,8 +123,8 @@ Assert-Equal $r1.Action 'fallback' '默认标题 → fallback'
 Assert-Equal $r1.ActualTitle 'hooks' 'fallback 使用项目名'
 
 $r2 = Simulate-TitleLogic "`u{2810} 多智能体审查" 'hooks'
-Assert-Equal $r2.Action 'fallback' 'Braille对话标题 → fallback (Braille是Claude Code动画前缀，属于默认标题)'
-Assert-Equal $r2.ActualTitle 'hooks' 'Braille标题fallback为项目名'
+Assert-Equal $r2.Action 'use-existing' 'Braille对话标题 → use-existing (可能是2.1.42会话标题，保留)'
+Assert-Equal $r2.ActualTitle "`u{2810} 多智能体审查" 'Braille标题保留原值'
 
 $r3 = Simulate-TitleLogic 'hooks-ui' 'hooks'
 Assert-Equal $r3.Action 'use-existing' '用户自定义 → use-existing'
@@ -234,9 +233,9 @@ function Simulate-FullFlow($CurrentWindowTitle, $ProjectName, $Delay, $UserFocus
     }
 }
 
-# 场景 A: Claude Code Braille标题（默认标题），用户未聚焦 → fallback到项目名，发送通知
+# 场景 A: Claude Code Braille+会话标题（非默认），用户未聚焦 → 保留标题，发送通知
 $flowA = Simulate-FullFlow "`u{2810} 代码审查" 'hooks' 10 -1
-Assert-Equal $flowA.TitleAction 'fallback' '流程A: Braille标题 → fallback为项目名'
+Assert-Equal $flowA.TitleAction 'use-existing' '流程A: Braille会话标题 → use-existing'
 Assert-Equal $flowA.ShouldNotify $true '流程A: 用户未聚焦 → 发送通知'
 
 # 场景 B: 默认标题，用户第5秒聚焦 → 不发送通知
@@ -247,6 +246,7 @@ Assert-Equal $flowB.ShouldNotify $false '流程B: 用户聚焦 → 不发送'
 
 # 场景 C: 权限提示，Delay=0 → 立即发送
 $flowC = Simulate-FullFlow "`u{2810} 权限请求" 'hooks' 0 -1
+Assert-Equal $flowC.TitleAction 'use-existing' '流程C: Braille会话标题 → use-existing'
 Assert-Equal $flowC.ShouldNotify $true '流程C: Delay=0 → 立即发送'
 
 # 场景 D: 用户自定义标题 → 保留

@@ -64,8 +64,7 @@ function Test-IsDefaultTitle([string]$Title) {
     # Claude Code 使用 Braille 字符(⠐⠑⠒等)、*、·、✻、. 作为动画前缀
     $ClaudePatterns = @(
         '^[*·✻.\s\u2800-\u28FF]*Claude Code$',  # * Claude Code, · Claude Code, ⠐ Claude Code
-        '^claude\s+-\s*.+$',                      # claude - hooks (必须有空格在 claude 后)
-        '^[\u2800-\u28FF]'                         # 以 Braille 字符开头 = Claude Code 动画前缀
+        '^claude\s+-\s*.+$'                       # claude - hooks (必须有空格在 claude 后)
     )
 
     # Shell 默认标题
