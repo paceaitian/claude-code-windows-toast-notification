@@ -207,12 +207,29 @@ if ($Payload.tool_input) {
     } catch { Write-DebugLog "ToolInput Encode Error: $_" }
 }
 
-# 7. Launch Worker
+# 7. PACE Stop 阻止检测
+# stop.js 阻止退出(exit 2)时递增 counter，通过时重置为 0
+# counter > 0 且无 degraded 文件 → 正在阻止中，跳过通知
+# counter > 0 但有 degraded 文件 → 降级放行(exit 0)，会话结束，正常通知
+$PaceBlockFile = Join-Path $PWD ".pace" "stop-block-count"
+$PaceDegradedFile = Join-Path $PWD ".pace" "degraded"
+if ((Test-Path $PaceBlockFile) -and -not (Test-Path $PaceDegradedFile)) {
+    $BlockRaw = (Get-Content $PaceBlockFile -Raw -ErrorAction SilentlyContinue)
+    if ($BlockRaw) {
+        $BlockRaw = $BlockRaw.Trim()
+        if ($BlockRaw -match '^\d+$' -and [int]$BlockRaw -gt 0) {
+            Write-DebugLog "Launcher: PACE Stop blocked (count=$BlockRaw). Skipping notification."
+            exit 0
+        }
+    }
+}
+
+# 8. Launch Worker
 $WorkerScript = "$Dir\Worker.ps1"
 
 $WorkerProc = Start-Process "pwsh" -WindowStyle Hidden -PassThru -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$WorkerScript`" -Worker -Base64Title `"$B64Title`" -Base64Message `"$B64Message`" -ProjectName `"$EncProject`" -NotificationType `"$NotificationType`" $AudioArg $TranscriptArg $DebugArg $DelayArg $TargetPidArg $SkipTitleArg $ActualTitleArg $ToolNameArg $ToolInputArg"
 
-# 8. Wait Mode
+# 9. Wait Mode
 if ($Wait) {
     if ($WorkerProc) {
         $TimeoutMs = $Script:CONFIG_WORKER_TIMEOUT_MS

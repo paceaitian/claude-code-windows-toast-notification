@@ -388,6 +388,68 @@ Write-Host "         Got: $($CrossResult3.Description)" -ForegroundColor DarkGra
 Remove-Item $CrossTestDir -Recurse -Force -ErrorAction SilentlyContinue
 
 # ============================================================================
+# 测试 15: PACE Stop 阻止时跳过通知
+# ============================================================================
+Write-Section "15. PACE Stop 阻止检测"
+
+# 模拟：在临时目录创建 .pace/stop-block-count，通过子进程运行 Launcher 检查逻辑
+$PaceTestDir = Join-Path $env:TEMP "toast-pace-test-$(Get-Random)"
+$PaceDir = Join-Path $PaceTestDir ".pace"
+New-Item -ItemType Directory -Path $PaceDir -Force | Out-Null
+
+# 提取 Launcher.ps1 的 PACE 检测逻辑为独立脚本测试
+$PaceCheckScript = @'
+param([string]$TestDir)
+Set-Location $TestDir
+$PaceBlockFile = Join-Path $PWD ".pace" "stop-block-count"
+$PaceDegradedFile = Join-Path $PWD ".pace" "degraded"
+if ((Test-Path $PaceBlockFile) -and -not (Test-Path $PaceDegradedFile)) {
+    $BlockRaw = (Get-Content $PaceBlockFile -Raw -ErrorAction SilentlyContinue)
+    if ($BlockRaw) {
+        $BlockRaw = $BlockRaw.Trim()
+        if ($BlockRaw -match '^\d+$' -and [int]$BlockRaw -gt 0) {
+            Write-Output "BLOCKED"
+            exit 0
+        }
+    }
+}
+Write-Output "NOTIFY"
+'@
+$PaceCheckFile = Join-Path $PaceTestDir "_pace_check.ps1"
+$PaceCheckScript | Set-Content $PaceCheckFile -Encoding UTF8
+
+# Case 1: counter=2, 无 degraded → 阻止中，应跳过
+Set-Content (Join-Path $PaceDir "stop-block-count") "2" -Encoding UTF8
+$R1 = pwsh -NoProfile -ExecutionPolicy Bypass -File $PaceCheckFile -TestDir $PaceTestDir
+Test-Assert "counter=2 无 degraded → BLOCKED" ($R1 -eq "BLOCKED")
+Write-Host "         Got: $R1" -ForegroundColor DarkGray
+
+# Case 2: counter=3, 有 degraded → 降级放行，应通知
+Set-Content (Join-Path $PaceDir "stop-block-count") "3" -Encoding UTF8
+Set-Content (Join-Path $PaceDir "degraded") "降级" -Encoding UTF8
+$R2 = pwsh -NoProfile -ExecutionPolicy Bypass -File $PaceCheckFile -TestDir $PaceTestDir
+Test-Assert "counter=3 有 degraded → NOTIFY" ($R2 -eq "NOTIFY")
+Write-Host "         Got: $R2" -ForegroundColor DarkGray
+
+# Case 3: counter=0 → 通过，应通知
+Set-Content (Join-Path $PaceDir "stop-block-count") "0" -Encoding UTF8
+Remove-Item (Join-Path $PaceDir "degraded") -ErrorAction SilentlyContinue
+$R3 = pwsh -NoProfile -ExecutionPolicy Bypass -File $PaceCheckFile -TestDir $PaceTestDir
+Test-Assert "counter=0 → NOTIFY" ($R3 -eq "NOTIFY")
+Write-Host "         Got: $R3" -ForegroundColor DarkGray
+
+# Case 4: 无 .pace 目录（非 PACE 项目） → 应通知
+$NoPaceDir = Join-Path $env:TEMP "toast-nopace-test-$(Get-Random)"
+New-Item -ItemType Directory -Path $NoPaceDir -Force | Out-Null
+$R4 = pwsh -NoProfile -ExecutionPolicy Bypass -File $PaceCheckFile -TestDir $NoPaceDir
+Test-Assert "无 .pace 目录 → NOTIFY" ($R4 -eq "NOTIFY")
+Write-Host "         Got: $R4" -ForegroundColor DarkGray
+
+# 清理
+Remove-Item $PaceTestDir -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item $NoPaceDir -Recurse -Force -ErrorAction SilentlyContinue
+
+# ============================================================================
 # 结果汇总
 # ============================================================================
 Write-Host ""
