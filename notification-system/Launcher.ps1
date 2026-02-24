@@ -14,6 +14,11 @@ param(
     [string]$AudioPath
 )
 
+# 通知开关检查（原先在 settings.json 的 inline -Command 中，
+# 2.1.51 起 bash 会展开 $env 导致语法错误，移入此处）
+if ($env:CLAUDE_NO_NOTIFICATION -eq '1') { exit 0 }
+if (Test-Path '.claude/no-notification') { exit 0 }
+
 # 0. Load Libs
 $Dir = Split-Path $MyInvocation.MyCommand.Path
 . "$Dir\Lib\Common.ps1"

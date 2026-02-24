@@ -100,9 +100,16 @@ try {
         }
     }
 
+    # B1 修复：检测链式命令（&&, ||, ;），防止 "echo x && rm -rf /" 整体匹配 "echo *" 被自动批准
+    # 管道（|）不算链式命令，属于同一管道的正常用法
+    $CmdFlat = ($Command -replace '\r?\n', ' ' -replace '\\\s+', ' ').Trim()
+    $HasChaining = $CmdFlat -match '(&&|\|\||;)'
+
     # 检查 allow 规则
     foreach ($Rule in $AllowRules) {
         if (Test-CommandPattern -Pattern $Rule.Pattern -Command $Command) {
+            # 链式命令且非全匹配规则 → 跳过自动批准，交由原生权限系统处理
+            if ($HasChaining -and $Rule.Pattern -ne '*') { continue }
             @{
                 hookEventName = "PreToolUse"
                 permissionDecision = "allow"

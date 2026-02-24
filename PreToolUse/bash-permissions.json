@@ -1,9 +1,0 @@
-{
-  "hooks": [
-    {
-      "type": "command",
-      "command": "powershell -ExecutionPolicy Bypass -File \"C:\\Users\\Xiao\\.claude\\hooks\\enforce-bash-permissions.ps1\""
-    }
-  ],
-  "matcher": "Bash"
-}
