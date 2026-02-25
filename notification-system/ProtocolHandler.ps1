@@ -72,7 +72,28 @@ try {
         # Launcher 已在重复时附加 #PID 后缀确保标题唯一，直接用 WindowTitle 搜索
         $TabSwitchedByUIA = $false
         if (-not [string]::IsNullOrWhiteSpace($WindowTitle)) {
-            # B2a: 搜索 WT 进程的所有窗口，找到包含目标 tab 的窗口并切换
+            # B2a: 标题重注入（Watchdog 退出后 OSC 覆盖，恢复自定义标题）
+            if ($PidArg -gt 0) {
+                try {
+                    [WinApi]::FreeConsole() | Out-Null
+                    if ([WinApi]::AttachConsole([uint32]$PidArg)) {
+                        [Console]::Title = $WindowTitle
+                        $Osc = "$([char]27)]0;$WindowTitle$([char]7)"
+                        [Console]::Write($Osc)
+                        [Console]::Out.Flush()
+                        Write-DebugLog "PROTOCOL: Re-injected title '$WindowTitle' into PID $PidArg"
+                    } else {
+                        Write-DebugLog "PROTOCOL: AttachConsole($PidArg) failed for title re-injection"
+                    }
+                } catch {
+                    Write-DebugLog "PROTOCOL: Title re-injection error: $_"
+                } finally {
+                    [WinApi]::FreeConsole() | Out-Null
+                }
+                Start-Sleep -Milliseconds 200
+            }
+
+            # B2b: 搜索 WT 进程的所有窗口，找到包含目标 tab 的窗口并切换
             try {
                 Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
                 $desktopRoot = [System.Windows.Automation.AutomationElement]::RootElement
@@ -154,13 +175,14 @@ try {
     elseif (-not [string]::IsNullOrWhiteSpace($WindowTitle)) {
         Write-DebugLog "PROTOCOL: Searching Title '$WindowTitle'"
 
+        # C1: Get-Process.MainWindowTitle（仅能匹配当前活跃 tab）
         $Proc = Get-Process | Where-Object { $_.MainWindowTitle -eq $WindowTitle -and $_.ProcessName -ne "explorer" } | Select-Object -First 1
         if (-not $Proc) {
             $Proc = Get-Process | Where-Object { $_.MainWindowTitle -like "*$WindowTitle*" -and $_.ProcessName -ne "explorer" } | Select-Object -First 1
         }
 
         if ($Proc) {
-            Write-DebugLog "PROTOCOL: Found $($Proc.ProcessName) ($($Proc.Id))"
+            Write-DebugLog "PROTOCOL: C1 Found $($Proc.ProcessName) ($($Proc.Id))"
             $Handle = $Proc.MainWindowHandle
 
             if ([WinApi]::IsIconic($Handle)) {
@@ -170,6 +192,60 @@ try {
             if (-not $Success) {
                 $wshell = New-Object -ComObject WScript.Shell
                 $wshell.AppActivate($Proc.Id)
+            }
+        }
+
+        # C2: UIA tab 搜索（Get-Process 只看活跃 tab，非活跃 tab 需要 UIA）
+        if (-not $Success) {
+            Write-DebugLog "PROTOCOL: C1 failed, trying C2 UIA tab search..."
+            try {
+                Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+                $desktopRoot = [System.Windows.Automation.AutomationElement]::RootElement
+                $tabTypeCondition = New-Object System.Windows.Automation.PropertyCondition(
+                    [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                    [System.Windows.Automation.ControlType]::TabItem)
+
+                $allWtProcs = Get-Process -Name WindowsTerminal -ErrorAction SilentlyContinue
+                foreach ($wtp in $allWtProcs) {
+                    $pidCond = New-Object System.Windows.Automation.PropertyCondition(
+                        [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $wtp.Id)
+                    $wtWins = $desktopRoot.FindAll(
+                        [System.Windows.Automation.TreeScope]::Children, $pidCond)
+
+                    foreach ($w in $wtWins) {
+                        $tabs = $w.FindAll(
+                            [System.Windows.Automation.TreeScope]::Descendants, $tabTypeCondition)
+                        foreach ($t in $tabs) {
+                            if ($t.Current.Name -like "*$WindowTitle*") {
+                                # 激活窗口
+                                $wtHwnd = [IntPtr]::new($w.Current.NativeWindowHandle)
+                                if ([WinApi]::IsIconic($wtHwnd)) { [WinApi]::ShowWindow($wtHwnd, 9) }
+                                [WinApi]::SetForegroundWindow($wtHwnd) | Out-Null
+                                Start-Sleep -Milliseconds 50
+
+                                # 切换 tab
+                                $selPat = $t.GetCurrentPattern(
+                                    [System.Windows.Automation.SelectionItemPattern]::Pattern)
+                                $selPat.Select()
+                                $TabSwitchedByUIA = $true
+                                $Success = $true
+                                Write-DebugLog "PROTOCOL: C2 UIA Selected tab '$($t.Current.Name)' in WT PID $($wtp.Id)"
+
+                                # 点击终端内容区激活输入焦点
+                                Start-Sleep -Milliseconds 100
+                                [WinApi]::ClickWindowCenter($wtHwnd)
+                                break
+                            }
+                        }
+                        if ($Success) { break }
+                    }
+                    if ($Success) { break }
+                }
+                if (-not $Success) {
+                    Write-DebugLog "PROTOCOL: C2 UIA tab '$WindowTitle' not found in any WT"
+                }
+            } catch {
+                Write-DebugLog "PROTOCOL: C2 UIA failed: $_"
             }
         }
     }

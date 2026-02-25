@@ -79,6 +79,7 @@ if ($ProjectName -eq "Claude" -and $env:CLAUDE_PROJECT_DIR) {
 $TargetPid = 0
 $CurrentId = $PID
 $FoundClaude = $false
+$ChainEntries = @()
 
 $MaxDepth = $Script:CONFIG_PARENT_PROCESS_MAX_DEPTH
 if (-not $MaxDepth) { $MaxDepth = 10 }
@@ -87,9 +88,16 @@ for ($i=0; $i -lt $MaxDepth; $i++) {
     try {
         $Proc = Get-Process -Id $CurrentId -ErrorAction Stop
         $Name = $Proc.ProcessName
+        $ParentId = [WinApi]::GetParentPid($CurrentId)
+
+        # 全层级诊断日志
+        Write-DebugLog "Launcher: L$i $Name (PID:$CurrentId ParentPID:$ParentId)"
+
+        # 收集链条，供 fallback 使用
+        $ChainEntries += @{ Name=$Name; Pid=$CurrentId; ParentPid=$ParentId; Level=$i }
 
         # Detect Claude Process in the chain
-        if ($Name -match "^(claude|node|claude-code)$") {
+        if ($Name -match "^(claude|node|claude-code)(\.|$)") {
             $FoundClaude = $true
         }
 
@@ -97,7 +105,7 @@ for ($i=0; $i -lt $MaxDepth; $i++) {
         if ($Name -match "^(cmd|pwsh|powershell|bash)$") {
             if ($FoundClaude) {
                 $TargetPid = $Proc.Id
-                Write-DebugLog "Launcher: Found Interactive Shell L$i '$Name' (PID: $TargetPid)"
+                Write-DebugLog "Launcher: Primary: Interactive Shell L$i '$Name' (PID: $TargetPid)"
                 break
             } else {
                 Write-DebugLog "Launcher: Skipping Runner Shell L$i '$Name' (PID: $($Proc.Id))"
@@ -105,10 +113,32 @@ for ($i=0; $i -lt $MaxDepth; $i++) {
         }
 
         # P/Invoke Walk Up (Extremely Fast)
-        $ParentId = [WinApi]::GetParentPid($CurrentId)
         if ($ParentId -le 0 -or $ParentId -eq $CurrentId) { break }
         $CurrentId = $ParentId
     } catch { break }
+}
+
+# Fallback：进程树断链时，反向搜索 shell→WT 直连
+if ($TargetPid -eq 0 -and $ChainEntries.Count -gt 0) {
+    Write-DebugLog "Launcher: Primary failed, trying terminal-parent fallback..."
+    for ($fi = $ChainEntries.Count - 1; $fi -ge 0; $fi--) {
+        $entry = $ChainEntries[$fi]
+        if ($entry.Name -match "^(cmd|pwsh|powershell|bash)$" -and $entry.ParentPid -gt 0) {
+            try {
+                $parentProc = Get-Process -Id $entry.ParentPid -ErrorAction Stop
+                if ($parentProc.ProcessName -match "^(WindowsTerminal|conhost)$") {
+                    $TargetPid = $entry.Pid
+                    Write-DebugLog "Launcher: Fallback: L$($entry.Level) $($entry.Name) (PID:$TargetPid) -> parent $($parentProc.ProcessName) (PID:$($entry.ParentPid))"
+                    break
+                }
+            } catch {
+                Write-DebugLog "Launcher: Fallback: Cannot verify parent PID $($entry.ParentPid): $_"
+            }
+        }
+    }
+    if ($TargetPid -eq 0) {
+        Write-DebugLog "Launcher: Fallback: No shell->terminal link found"
+    }
 }
 
 # 4. Inject Title (注入标题，Watchdog 会持续维护)
