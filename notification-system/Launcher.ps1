@@ -133,6 +133,45 @@ if ($TargetPid -gt 0) {
             if (Test-IsDefaultTitle $CurrentTitle) {
                 # 默认值（空 / Claude Code / PowerShell / cmd）→ 注入项目名，Watchdog 持续维护
                 $ActualTitle = $ProjectName
+
+                # 4a. 重复标题检测：同名项目在其他 WT tab → 附加 #PID 区分
+                try {
+                    $wtProcs = Get-Process -Name WindowsTerminal -ErrorAction SilentlyContinue
+                    if ($wtProcs) {
+                        Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+                        $uiaRoot = [System.Windows.Automation.AutomationElement]::RootElement
+                        $tabTypeCond = New-Object System.Windows.Automation.PropertyCondition(
+                            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+                            [System.Windows.Automation.ControlType]::TabItem)
+                        $DuplicateFound = $false
+                        foreach ($wtp in $wtProcs) {
+                            $wtPidCond = New-Object System.Windows.Automation.PropertyCondition(
+                                [System.Windows.Automation.AutomationElement]::ProcessIdProperty, $wtp.Id)
+                            $wtWins = $uiaRoot.FindAll(
+                                [System.Windows.Automation.TreeScope]::Children, $wtPidCond)
+                            foreach ($w in $wtWins) {
+                                $uiaTabs = $w.FindAll(
+                                    [System.Windows.Automation.TreeScope]::Descendants, $tabTypeCond)
+                                foreach ($ut in $uiaTabs) {
+                                    if ($ut.Current.Name -like "*$ProjectName*") {
+                                        $DuplicateFound = $true
+                                        Write-DebugLog "Launcher: Duplicate tab '$($ut.Current.Name)'"
+                                        break
+                                    }
+                                }
+                                if ($DuplicateFound) { break }
+                            }
+                            if ($DuplicateFound) { break }
+                        }
+                        if ($DuplicateFound) {
+                            $ActualTitle = "${ProjectName}#${TargetPid}"
+                            Write-DebugLog "Launcher: PID-suffixed title '$ActualTitle'"
+                        }
+                    }
+                } catch {
+                    Write-DebugLog "Launcher: Duplicate check error: $_"
+                }
+
                 [Console]::Title = $ActualTitle
                 $Osc = "$([char]27)]0;$ActualTitle$([char]7)"
                 [Console]::Write($Osc)

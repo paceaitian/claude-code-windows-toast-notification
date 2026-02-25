@@ -68,27 +68,11 @@ try {
             $ClimbPid = $ParentPid
         }
 
-        # B2: 重新注入标题 + UI Automation 搜索所有 WT 窗口切换 tab
+        # B2: UI Automation 搜索 WT 窗口切换 tab
+        # Launcher 已在重复时附加 #PID 后缀确保标题唯一，直接用 WindowTitle 搜索
         $TabSwitchedByUIA = $false
         if (-not [string]::IsNullOrWhiteSpace($WindowTitle)) {
-            # B2a: 重新注入标题（Watchdog 已退出时的安全网）
-            try {
-                [WinApi]::FreeConsole() | Out-Null
-                if ([WinApi]::AttachConsole([uint32]$PidArg)) {
-                    [Console]::Title = $WindowTitle
-                    [Console]::Write("`e]0;$WindowTitle`a")
-                    [WinApi]::FreeConsole() | Out-Null
-                    Write-DebugLog "PROTOCOL: Re-injected title '$WindowTitle' into PID $PidArg"
-                    Start-Sleep -Milliseconds 200
-                } else {
-                    Write-DebugLog "PROTOCOL: AttachConsole($PidArg) failed"
-                }
-            } catch {
-                [WinApi]::FreeConsole() | Out-Null
-                Write-DebugLog "PROTOCOL: Title re-injection failed: $_"
-            }
-
-            # B2b: 搜索 WT 进程的所有窗口，找到包含目标 tab 的窗口并切换
+            # B2a: 搜索 WT 进程的所有窗口，找到包含目标 tab 的窗口并切换
             try {
                 Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
                 $desktopRoot = [System.Windows.Automation.AutomationElement]::RootElement
